@@ -1,0 +1,2211 @@
+"""Generate the cleared, Kaggle-ready project notebooks."""
+
+from pathlib import Path
+import textwrap
+
+import nbformat as nbf
+
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / "notebooks"
+
+
+def md(value):
+    return nbf.v4.new_markdown_cell(textwrap.dedent(value).strip())
+
+
+def code(value):
+    return nbf.v4.new_code_cell(textwrap.dedent(value).strip())
+
+
+def save(name, cells):
+    notebook = nbf.v4.new_notebook(
+        cells=cells,
+        metadata={
+            "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+            "language_info": {"name": "python", "version": "3"},
+        },
+    )
+    nbf.write(notebook, OUT / name)
+    print(f"Wrote {name}: {len(cells)} cells")
+
+
+EDA = [
+    md("""
+    # Card Database and Starter-Deck EDA
+
+    **Purpose.** Audit the official English card catalogue and starter deck
+    before changing either policy or deck construction.
+
+    **Decision question.** Which card-pool and deck properties constrain our
+    first agent experiments?
+
+    This is a simulation competition: EDA means catalogue, deck, state-space,
+    and episode analysis - not train/test target exploration. Run with the
+    `pokemon-tcg-ai-battle` competition data attached. A local `data/raw`
+    fallback is supported.
+    """),
+    md("""
+    ## 1. Configuration
+
+    The input resolver avoids account-specific paths. We keep plots consistent
+    and separate card identity from move-level records because one card can
+    occupy several catalogue rows.
+    """),
+    code("""
+    from collections import Counter
+    from math import comb
+    from pathlib import Path
+    import re
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    import seaborn as sns
+
+    DATA_FILENAME = "EN_Card_Data.csv"
+    sns.set_theme(style="whitegrid", palette="viridis")
+    pd.set_option("display.max_columns", 50)
+
+    def find_file(filename: str) -> Path:
+        root = Path("/kaggle/input")
+        matches = sorted(root.rglob(filename)) if root.exists() else []
+        if matches:
+            return matches[0]
+        local = Path("../data/raw") / filename
+        if local.exists():
+            return local
+        raise FileNotFoundError(
+            f"Attach competition data or place {filename} in data/raw/."
+        )
+
+    card_path = find_file(DATA_FILENAME)
+    print(f"Catalogue: {card_path}")
+    """),
+    md("""
+    ## 2. Schema and representation audit
+
+    We distinguish catalogue rows, unique card IDs, and card-move records.
+    Structural missingness is expected: Energy and Trainer cards do not have
+    Pokemon HP or evolution fields.
+    """),
+    code("""
+    raw = pd.read_csv(card_path)
+    cards = raw.rename(columns=lambda x: re.sub(
+        r"[^a-z0-9]+", "_", x.strip().lower()
+    ).strip("_"))
+
+    summary = pd.Series({
+        "catalogue_rows": len(cards),
+        "columns": cards.shape[1],
+        "unique_card_ids": cards.card_id.nunique(),
+        "exact_duplicate_rows": cards.duplicated().sum(),
+    })
+    display(summary.to_frame("value"))
+    display(cards.head())
+
+    quality = pd.DataFrame({
+        "dtype": cards.dtypes.astype(str),
+        "missing": cards.isna().sum(),
+        "missing_pct": cards.isna().mean().mul(100).round(2),
+        "unique": cards.nunique(dropna=True),
+    }).sort_values("missing_pct", ascending=False)
+    display(quality)
+    """),
+    md("""
+    **Interpretation.** Do not globally impute the catalogue. Parse and analyze
+    fields within relevant card categories, and use `Card ID` as the stable
+    identity key. Names and move rows are not unique enough for policy logic.
+    """),
+    md("""
+    ## 3. Card-pool composition
+
+    Collapse identity fields to one record per card for composition plots.
+    Attacks remain a separate one-to-many table for later action scoring.
+    """),
+    code("""
+    category_col = "stage_pok_mon_type_energy_and_trainer"
+    identity = [
+        "card_id", "card_name", "expansion", category_col, "rule", "category",
+        "previous_stage", "hp", "type", "weakness", "resistance_type", "retreat",
+    ]
+    identity = [column for column in identity if column in cards]
+    unique_cards = cards[identity].groupby("card_id", as_index=False).first()
+
+    counts = unique_cards[category_col].fillna("Missing").value_counts().head(15)
+    ax = counts.sort_values().plot.barh(
+        figsize=(10, 6), color=sns.color_palette("viridis", len(counts))
+    )
+    ax.set(title="Largest card categories", xlabel="Unique cards", ylabel="Category")
+    plt.tight_layout()
+    plt.show()
+
+    unique_cards["hp_numeric"] = pd.to_numeric(unique_cards.hp, errors="coerce")
+    unique_cards["retreat_numeric"] = pd.to_numeric(unique_cards.retreat, errors="coerce")
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+    sns.histplot(unique_cards.hp_numeric.dropna(), bins=30, ax=axes[0])
+    axes[0].set_title("Printed HP distribution")
+    sns.countplot(x=unique_cards.retreat_numeric, ax=axes[1], color="#2a788e")
+    axes[1].set_title("Retreat-cost distribution")
+    plt.tight_layout()
+    plt.show()
+    """),
+    md("""
+    **Interpretation.** Catalogue frequency is descriptive, not a deck recipe.
+    Deck strength depends on legal counts, evolution support, energy curve,
+    interactions, and whether the policy can sequence them correctly.
+    """),
+    md("""
+    ## 4. Starter-deck audit
+
+    Basic Energy can exceed the ordinary four-copy heuristic. We flag other
+    large counts for review rather than claiming that a simplified check is the
+    official legality test. The simulator start result remains authoritative.
+    """),
+    code("""
+    def find_deck() -> Path:
+        candidates = [Path("../agent/deck.csv"), Path("agent/deck.csv")]
+        candidates += sorted(Path("/kaggle/input").rglob("sample_submission/deck.csv"))
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError("Could not find a repository or official starter deck.")
+
+    deck_path = find_deck()
+    deck = [int(x) for x in deck_path.read_text().splitlines() if x.strip()]
+    deck_counts = pd.Series(Counter(deck), name="copies").rename_axis("card_id").reset_index()
+    columns = ["card_id", "card_name", category_col, "hp", "retreat"]
+    deck_view = deck_counts.merge(unique_cards[columns], on="card_id", how="left")
+    deck_view = deck_view.sort_values(["copies", "card_id"], ascending=[False, True])
+
+    print(f"Deck: {deck_path}")
+    print(f"Cards: {len(deck)}; unique IDs: {len(deck_counts)}")
+    display(deck_view)
+    assert len(deck) == 60, "Submission decks require exactly 60 cards."
+    assert deck_view.card_name.notna().all(), "All deck IDs must exist in the catalogue."
+
+    basic_energy = deck_view[category_col].fillna("").str.contains(
+        "Basic Energy", case=False, regex=False
+    )
+    print("Non-Basic-Energy entries above four copies (manual review):")
+    display(deck_view[(deck_view.copies > 4) & ~basic_energy])
+    """),
+    md("""
+    ## 5. Deck roles and setup consistency
+
+    A legal 60-card list can still be operationally fragile. The opening hand
+    needs at least one Basic Pokemon, so we compute the exact hypergeometric
+    setup probability and compare it with nearby Basic-Pokemon counts. This is
+    the most actionable deck-construction diagnostic in this EDA.
+    """),
+    code("""
+    def deck_role(value: object) -> str:
+        label = str(value)
+        if "Basic Energy" in label:
+            return "Basic Energy"
+        if label.startswith("Basic Pok"):
+            return "Basic Pokemon"
+        if "Pok" in label:
+            return "Evolution Pokemon"
+        for role in ("Supporter", "Item", "Tool", "Stadium", "Special Energy"):
+            if role in label:
+                return role
+        return "Other"
+
+    deck_view["role"] = deck_view[category_col].map(deck_role)
+    role_counts = deck_view.groupby("role", as_index=False).copies.sum()
+    role_counts["share_pct"] = role_counts.copies.div(len(deck)).mul(100).round(1)
+    display(role_counts.sort_values("copies", ascending=False))
+
+    ax = role_counts.sort_values("copies").plot.barh(
+        x="role", y="copies", legend=False, figsize=(9, 5), color="#2a788e"
+    )
+    ax.set(title="Starter-deck composition by functional role", xlabel="Cards", ylabel="")
+    plt.tight_layout()
+    plt.show()
+
+    OPENING_HAND_SIZE = 7
+    current_basic_count = int(
+        deck_view.loc[deck_view.role.eq("Basic Pokemon"), "copies"].sum()
+    )
+
+    def setup_probability(basic_count: int, deck_size: int = 60) -> float:
+        if basic_count <= 0:
+            return 0.0
+        return 1 - comb(deck_size - basic_count, OPENING_HAND_SIZE) / comb(
+            deck_size, OPENING_HAND_SIZE
+        )
+
+    setup_curve = pd.DataFrame({"basic_pokemon": np.arange(4, 17)})
+    setup_curve["setup_probability"] = setup_curve.basic_pokemon.map(setup_probability)
+    current_setup_probability = setup_probability(current_basic_count)
+    current_mulligan_probability = 1 - current_setup_probability
+
+    display(pd.Series({
+        "basic_pokemon": current_basic_count,
+        "opening_hand_size": OPENING_HAND_SIZE,
+        "p_at_least_one_basic": current_setup_probability,
+        "p_no_basic_mulligan": current_mulligan_probability,
+    }).to_frame("value"))
+
+    ax = setup_curve.plot(
+        x="basic_pokemon", y="setup_probability", marker="o", legend=False,
+        figsize=(9, 4), color="#2a788e"
+    )
+    ax.scatter([current_basic_count], [current_setup_probability], color="#d1495b", zorder=3)
+    ax.axhline(0.80, color="grey", linestyle="--", linewidth=1, label="80% reference")
+    ax.set(
+        title="Probability that a seven-card opening hand contains a Basic Pokemon",
+        xlabel="Basic Pokemon in 60-card deck", ylabel="Probability", ylim=(0, 1),
+    )
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+    """),
+    md("""
+    **Decision.** With only six Basic Pokemon, the starter deck has substantial
+    mulligan risk. Policy improvements cannot fully repair hands that fail to
+    set up; future deck experiments should vary Basic-Pokemon count separately
+    from policy experiments so their effects remain attributable.
+    """),
+    md("""
+    ## 6. Evolution-line support
+
+    Evolution cards are only actionable when their printed previous stage is
+    also present. We audit every evolution line by name and weight the result by
+    deck copies. This catches dead evolution cards without pretending to model
+    draw order or board state.
+    """),
+    code("""
+    deck_names = set(deck_view.card_name.dropna().astype(str))
+    evolution_columns = [
+        "card_id", "card_name", "previous_stage", "copies", "role"
+    ]
+    evolution_view = deck_counts.merge(
+        unique_cards[["card_id", "card_name", "previous_stage"]],
+        on="card_id", how="left"
+    )
+    evolution_view = evolution_view[evolution_view.previous_stage.notna()].copy()
+    evolution_view["previous_stage_in_deck"] = evolution_view.previous_stage.isin(deck_names)
+    evolution_view["support_copies"] = evolution_view.previous_stage.map(
+        deck_view.set_index("card_name").copies
+    ).fillna(0).astype(int)
+    display(evolution_view[evolution_columns[:-1] + ["previous_stage_in_deck", "support_copies"]])
+
+    evolution_copies = int(evolution_view.copies.sum())
+    supported_evolution_copies = int(
+        evolution_view.loc[evolution_view.previous_stage_in_deck, "copies"].sum()
+    )
+    evolution_support_rate = (
+        supported_evolution_copies / evolution_copies if evolution_copies else 1.0
+    )
+    print(f"Evolution support rate by copies: {evolution_support_rate:.1%}")
+    """),
+    md("""
+    **Decision.** The current Stage 1 line is structurally supported. The agent
+    should therefore preserve evolution opportunities and favor development
+    actions early, while episode telemetry determines whether those cards are
+    drawn and sequenced reliably in practice.
+    """),
+    md("""
+    ## 7. Move structure and attack efficiency
+
+    The first Kaggle run confirmed a 60-card starter deck with only nine unique
+    IDs. That concentration makes aggregate catalogue plots insufficient: we
+    need to inspect the attacks, energy requirements, evolution support, and
+    retreat burden of cards the baseline can actually draw.
+    """),
+    code("""
+    move_columns = [
+        "card_id", "card_name", "move_name", "cost", "damage",
+        "effect_explanation",
+    ]
+    moves = cards[[column for column in move_columns if column in cards]].copy()
+    moves = moves[moves.move_name.notna()].copy()
+    moves["printed_damage"] = pd.to_numeric(moves.damage, errors="coerce")
+    moves["damage_floor"] = pd.to_numeric(
+        moves.damage.astype(str).str.extract(r"(\d+)")[0], errors="coerce"
+    )
+    moves["energy_symbols"] = moves.cost.fillna("").str.count(r"\{[^}]+\}")
+    moves["variable_damage"] = moves.damage.notna() & moves.printed_damage.isna()
+    moves["damage_per_energy"] = moves.damage_floor.div(
+        moves.energy_symbols.replace(0, np.nan)
+    )
+
+    deck_moves = moves[moves.card_id.isin(deck_counts.card_id)].merge(
+        deck_counts, on="card_id", how="left"
+    ).sort_values(["copies", "card_id", "move_name"], ascending=[False, True, True])
+    display(deck_moves[
+        ["card_id", "card_name", "copies", "move_name", "cost", "damage",
+         "energy_symbols", "damage_per_energy", "variable_damage"]
+    ])
+
+    plotted_moves = deck_moves.dropna(subset=["damage_floor", "energy_symbols"]).copy()
+    if not plotted_moves.empty:
+        ax = sns.scatterplot(
+            data=plotted_moves, x="energy_symbols", y="damage_floor",
+            hue="card_name", size="copies", sizes=(70, 220), s=120
+        )
+        ax.set(
+            title="Printed damage floor versus attack energy requirement",
+            xlabel="Printed energy symbols", ylabel="Damage floor"
+        )
+        plt.tight_layout()
+        plt.show()
+
+    deck_detail = deck_view.copy()
+    deck_detail["weighted_retreat"] = (
+        pd.to_numeric(deck_detail.retreat, errors="coerce").fillna(0)
+        * deck_detail.copies
+    )
+    deck_summary = pd.Series({
+        "cards": len(deck),
+        "unique_ids": len(deck_counts),
+        "basic_energy_cards": int(deck_view.loc[basic_energy, "copies"].sum()),
+        "non_energy_cards": int(deck_view.loc[~basic_energy, "copies"].sum()),
+        "deck_moves": len(deck_moves),
+        "variable_damage_moves": int(deck_moves.variable_damage.sum()),
+        "weighted_retreat_cost": float(deck_detail.weighted_retreat.sum()),
+        "basic_pokemon": current_basic_count,
+        "opening_setup_probability": current_setup_probability,
+        "opening_mulligan_probability": current_mulligan_probability,
+        "evolution_support_rate": evolution_support_rate,
+    })
+    display(deck_summary.to_frame("value"))
+    """),
+    code("""
+    import json
+
+    if Path("/kaggle/working").exists():
+        output = Path("/kaggle/working")
+    else:
+        output = Path("../scratch") if Path.cwd().name == "notebooks" else Path("scratch")
+        output.mkdir(parents=True, exist_ok=True)
+    eda_summary = {
+        "catalogue_rows": int(len(cards)),
+        "unique_card_ids": int(cards.card_id.nunique()),
+        "deck": {key: float(value) for key, value in deck_summary.items()},
+        "deck_card_ids": {str(int(row.card_id)): int(row.copies)
+                          for row in deck_counts.itertuples()},
+    }
+    (output / "card_eda_summary.json").write_text(
+        json.dumps(eda_summary, indent=2)
+    )
+    print(f"Saved summary to {output / 'card_eda_summary.json'}")
+    """),
+    md("""
+    ## 8. Card-reference PDF audit
+
+    The official English PDF is a visual lookup from simulator card ID to card
+    name, expansion, collection number, and card image. The CSV remains the
+    computational source of truth; bulk OCR would be slower, noisier, and would
+    unnecessarily reproduce protected card content.
+
+    A repository audit of the 137.7 MB English document found 1,306 pages and
+    rendered pages 1, 2, 654, 1,305, and 1,306 for structural sampling. Set
+    `RUN_PDF_RENDER = True` only when a human needs to resolve a visual ambiguity.
+    """),
+    code("""
+    RUN_PDF_RENDER = False
+    PDF_SAMPLE_PAGES = (1, 2, 654, 1305, 1306)
+    pdf_candidates = sorted(Path("/kaggle/input").rglob("*List_EN.pdf"))
+    if not pdf_candidates:
+        pdf_candidates = sorted(Path("../tmp/pdfs").glob("*.pdf"))
+    pdf_path = pdf_candidates[0] if pdf_candidates else None
+
+    pdf_audit = {
+        "role": "visual card-ID reference; CSV is the analysis source",
+        "observed_pages": 1306,
+        "sampled_pages": list(PDF_SAMPLE_PAGES),
+        "file_found": pdf_path is not None,
+        "size_mb": round(pdf_path.stat().st_size / 1_000_000, 2) if pdf_path else None,
+    }
+    display(pd.Series(pdf_audit).to_frame("value"))
+
+    if RUN_PDF_RENDER:
+        import fitz
+        from IPython.display import display as display_image
+        from PIL import Image
+
+        if pdf_path is None:
+            raise FileNotFoundError("Attach the English Card ID PDF before rendering.")
+        document = fitz.open(pdf_path)
+        assert document.page_count == pdf_audit["observed_pages"]
+        for page_number in PDF_SAMPLE_PAGES:
+            page = document[page_number - 1]
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(0.75, 0.75), alpha=False)
+            image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+            print(f"Reference page {page_number}")
+            display_image(image)
+    else:
+        print("PDF rendering skipped by default; enable only for targeted visual review.")
+
+    eda_summary["pdf_reference"] = pdf_audit
+    (output / "card_eda_summary.json").write_text(json.dumps(eda_summary, indent=2))
+    """),
+    md("""
+    ## 9. Decision summary and next experiment
+
+    The EDA now answers a sequence of operational questions rather than merely
+    cataloguing columns:
+
+    1. **Can the data be joined safely?** Yes - use card ID and keep card moves
+       separate from card identity.
+    2. **Can the deck initialize?** Yes - the list has 60 recognized cards and
+       no non-Basic-Energy entry above four copies.
+    3. **Can it set up consistently?** This is the principal weakness: only six
+       Basic Pokemon create substantial opening-hand mulligan risk.
+    4. **Are evolutions structurally live?** Yes - the Stage 1 line has its
+       required previous stage in the deck.
+    5. **Can printed damage define the policy alone?** No - variable damage and
+       effects require simulator-backed episode evaluation.
+
+    **Next controlled experiment.** Keep the promoted development-first policy
+    fixed and test one immediate-knockout exception. Do not change deck
+    construction in the same experiment. After that policy result is isolated,
+    test Basic-Pokemon count as a separate deck-consistency intervention.
+
+    **Limitation.** Printed card data does not reveal realized draw order,
+    strategic synergy, or opponent prevalence. Those require controlled episode
+    evidence with named-context telemetry.
+    """),
+]
+
+
+EVALUATION = [
+    md("""
+    # Baseline Reliability and Comparative Evaluation
+
+    **Purpose.** Validate the repository policy against the official simulator,
+    then compare it with Kaggle's random sample policy across both player seats.
+
+    **Decision question.** Is the deterministic policy reliable, and does it
+    provide measurable improvement over the official control? This is an
+    offline screening result, not a ladder-rating estimate.
+    """),
+    md("""
+    ## 1. Configuration and reproducibility limits
+
+    The previous run completed four self-play games but exposed only numeric
+    context IDs and no control comparison. This revision records named decision
+    contexts and action types, retains every failure, and balances candidate
+    games across both seats.
+
+    Python's random policy is seeded. The current simulator wrapper does not
+    expose its internal card-draw or coin-toss seed, so seat-balanced games are
+    independent repetitions rather than exact paired seeds.
+    """),
+    code("""
+    from collections import Counter
+    from pathlib import Path
+    import importlib.util
+    import json
+    import random
+    import shutil
+    import sys
+    import time
+
+    import numpy as np
+    import pandas as pd
+
+    CONTRACT_GAMES = 4
+    GAMES_PER_SEAT = 20
+    MAX_DECISIONS = 10_000
+    BASE_SEED = 42
+    BOOTSTRAP_SAMPLES = 10_000
+    WORK_DIR = Path("/kaggle/working/agent_eval")
+    """),
+    code("""
+    def first_match(pattern: str) -> Path:
+        matches = sorted(Path("/kaggle/input").rglob(pattern))
+        if not matches:
+            raise FileNotFoundError(f"No Kaggle input matched {pattern}")
+        return matches[0]
+
+    def load_module(name: str, path: Path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    sample_dir = first_match("sample_submission/main.py").parent
+    candidates = [Path("../agent"), Path("agent")]
+    candidates += [
+        path.parent for path in sorted(Path("/kaggle/input").rglob("main.py"))
+        if "sample_submission" not in path.parts and "cg" not in path.parts
+    ]
+    repo_agent = next(
+        (path for path in candidates
+         if (path / "main.py").exists() and (path / "deck.csv").exists()),
+        None,
+    )
+    if repo_agent is None:
+        raise FileNotFoundError("Attach the private agent-source dataset.")
+    print(f"Official control: {sample_dir / 'main.py'}")
+    print(f"Candidate: {repo_agent / 'main.py'}")
+    """),
+    md("""
+    ## 2. Isolated simulator and policies
+
+    The complete official `cg` directory is copied into working storage. The
+    candidate and control are loaded as separate modules, while both use the
+    same reviewed 60-card deck so this experiment isolates policy behavior.
+    """),
+    code("""
+    if WORK_DIR.exists():
+        shutil.rmtree(WORK_DIR)
+    shutil.copytree(sample_dir, WORK_DIR)
+    shutil.copy2(repo_agent / "main.py", WORK_DIR / "candidate_main.py")
+    shutil.copy2(repo_agent / "deck.csv", WORK_DIR / "deck.csv")
+
+    sys.path.insert(0, str(WORK_DIR))
+    from cg.api import OptionType, SelectContext, to_observation_class
+    from cg.game import battle_finish, battle_select, battle_start
+
+    candidate = load_module("candidate_policy", WORK_DIR / "candidate_main.py")
+    control = load_module("official_random_policy", sample_dir / "main.py")
+    deck = candidate.read_deck_csv()
+    assert len(deck) == 60
+    """),
+    md("""
+    ## 3. Instrumented game runner
+
+    Every action is checked before the simulator receives it. Telemetry uses
+    enum names rather than opaque integers, making high-frequency decision
+    bottlenecks immediately visible. Exceptions and decision-limit stalls are
+    preserved as failed games.
+    """),
+    code("""
+    def enum_name(enum_class, value) -> str:
+        try:
+            return enum_class(value).name
+        except (ValueError, TypeError):
+            return f"UNKNOWN_{value}"
+
+    def validate_action(obs, action: list[int]) -> None:
+        select = obs.select
+        assert isinstance(action, list)
+        assert all(isinstance(index, int) for index in action)
+        assert len(action) == len(set(action))
+        assert select.minCount <= len(action) <= select.maxCount
+        assert all(0 <= index < len(select.option) for index in action)
+
+    def play_game(
+        policies: dict[int, object],
+        game_id: int,
+        candidate_player: int | None,
+        experiment: str,
+    ) -> dict:
+        random.seed(BASE_SEED + game_id)
+        started = time.perf_counter()
+        decisions = 0
+        contexts, actions = Counter(), Counter()
+        role_contexts, role_actions = Counter(), Counter()
+        try:
+            obs_dict, start_data = battle_start(deck, deck)
+            if obs_dict is None:
+                return {
+                    "status": "start_error", "experiment": experiment,
+                    "game": game_id, "candidate_player": candidate_player,
+                    "error_player": start_data.errorPlayer,
+                    "error_type": start_data.errorType,
+                }
+            while decisions < MAX_DECISIONS:
+                obs = to_observation_class(obs_dict)
+                if obs.current is not None and obs.current.result != -1:
+                    winner = int(obs.current.result)
+                    if candidate_player is None:
+                        candidate_score = None
+                    elif winner == candidate_player:
+                        candidate_score = 1.0
+                    elif winner in (0, 1):
+                        candidate_score = 0.0
+                    else:
+                        candidate_score = 0.5
+                    return {
+                        "status": "finished", "experiment": experiment,
+                        "game": game_id, "candidate_player": candidate_player,
+                        "winner": winner, "candidate_score": candidate_score,
+                        "turn": int(obs.current.turn), "decisions": decisions,
+                        "seconds": time.perf_counter() - started,
+                        "contexts": dict(contexts), "actions": dict(actions),
+                        "role_contexts": dict(role_contexts),
+                        "role_actions": dict(role_actions),
+                    }
+                player = int(obs.current.yourIndex)
+                role = (
+                    "candidate"
+                    if candidate_player is None or player == candidate_player
+                    else "control"
+                )
+                context_name = enum_name(SelectContext, obs.select.context)
+                contexts[context_name] += 1
+                role_contexts[f"{role}:{context_name}"] += 1
+                action = policies[player].agent(obs_dict)
+                validate_action(obs, action)
+                for index in action:
+                    action_name = enum_name(OptionType, obs.select.option[index].type)
+                    actions[action_name] += 1
+                    role_actions[f"{role}:{action_name}"] += 1
+                obs_dict = battle_select(action)
+                decisions += 1
+            return {
+                "status": "decision_limit", "experiment": experiment,
+                "game": game_id, "candidate_player": candidate_player,
+                "decisions": decisions,
+            }
+        except Exception as error:
+            return {
+                "status": "exception", "experiment": experiment,
+                "game": game_id, "candidate_player": candidate_player,
+                "error": f"{type(error).__name__}: {error}",
+                "decisions": decisions,
+            }
+        finally:
+            try:
+                battle_finish()
+            except Exception:
+                pass
+    """),
+    md("""
+    ## 4. Contract smoke test
+
+    Candidate-versus-candidate games test deck initialization, action legality,
+    termination, and runtime. They do not measure strength.
+    """),
+    code("""
+    contract_results = [
+        play_game({0: candidate, 1: candidate}, game, None, "contract_self_play")
+        for game in range(CONTRACT_GAMES)
+    ]
+    contract_df = pd.DataFrame(contract_results)
+    display(contract_df.drop(
+        columns=["contexts", "actions", "role_contexts", "role_actions"],
+        errors="ignore",
+    ))
+    contract_failures = contract_df[contract_df.status != "finished"]
+    assert contract_failures.empty, contract_failures.to_dict("records")
+    print(f"PASS: {len(contract_df)}/{len(contract_df)} contract games finished")
+    """),
+    md("""
+    ## 5. Candidate versus official random control
+
+    The candidate plays an equal number of games as player 0 and player 1.
+    A bootstrap interval summarizes game-level uncertainty. Because simulator
+    seeds are unavailable, treat this as a screening estimate rather than a
+    paired causal measurement.
+    """),
+    code("""
+    matchup_results = []
+    game_id = 10_000
+    for candidate_player in (0, 1):
+        for repetition in range(GAMES_PER_SEAT):
+            policies = {
+                candidate_player: candidate,
+                1 - candidate_player: control,
+            }
+            matchup_results.append(play_game(
+                policies, game_id, candidate_player, "candidate_vs_random"
+            ))
+            game_id += 1
+
+    matchup_df = pd.DataFrame(matchup_results)
+    display(matchup_df.drop(
+        columns=["contexts", "actions", "role_contexts", "role_actions"],
+        errors="ignore",
+    ))
+    failures = matchup_df[matchup_df.status != "finished"]
+    finished = matchup_df[matchup_df.status == "finished"].copy()
+    assert failures.empty, failures.to_dict("records")
+
+    scores = finished.candidate_score.to_numpy(dtype=float)
+    rng = np.random.default_rng(BASE_SEED)
+    bootstrap_means = rng.choice(
+        scores, size=(BOOTSTRAP_SAMPLES, len(scores)), replace=True
+    ).mean(axis=1)
+    ci_low, ci_high = np.quantile(bootstrap_means, [0.025, 0.975])
+    wins = int((scores == 1.0).sum())
+    draws = int((scores == 0.5).sum())
+    losses = int((scores == 0.0).sum())
+    summary = {
+        "games": len(finished), "wins": wins, "draws": draws, "losses": losses,
+        "score_rate": float(scores.mean()),
+        "bootstrap_95_low": float(ci_low), "bootstrap_95_high": float(ci_high),
+        "failures": len(failures),
+    }
+    if len(failures):
+        decision = "REJECT: runtime failures observed"
+    elif ci_high < 0.5:
+        decision = "REJECT: candidate is worse than random control"
+    elif ci_low > 0.5:
+        decision = "PASS SCREEN: evaluate against stronger frozen controls"
+    else:
+        decision = "HOLD: interval overlaps parity"
+    summary["decision"] = decision
+    display(pd.Series(summary).to_frame("value"))
+    print(f"Promotion decision: {decision}")
+    display(finished.groupby("candidate_player").candidate_score.agg(
+        games="size", score_rate="mean"
+    ))
+    """),
+    md("""
+    ## 6. Decision-context and action telemetry
+
+    The first run spent most decisions in context `0`, which was unreadable.
+    Named aggregation below shows where future heuristics or search can affect
+    the largest share of decisions and which actions the policy actually uses.
+    """),
+    code("""
+    context_counts, action_counts = Counter(), Counter()
+    role_context_counts, role_action_counts = Counter(), Counter()
+    for row in contract_results + matchup_results:
+        context_counts.update(row.get("contexts", {}))
+        action_counts.update(row.get("actions", {}))
+        role_context_counts.update(row.get("role_contexts", {}))
+        role_action_counts.update(row.get("role_actions", {}))
+
+    context_df = pd.Series(context_counts, name="decisions").sort_values(ascending=False).to_frame()
+    action_df = pd.Series(action_counts, name="selections").sort_values(ascending=False).to_frame()
+    display(context_df)
+    display(action_df)
+
+    role_action_rows = [
+        {"role": key.split(":", 1)[0], "action": key.split(":", 1)[1],
+         "selections": value}
+        for key, value in role_action_counts.items()
+    ]
+    role_context_rows = [
+        {"role": key.split(":", 1)[0], "context": key.split(":", 1)[1],
+         "decisions": value}
+        for key, value in role_context_counts.items()
+    ]
+    role_action_df = pd.DataFrame(role_action_rows).pivot_table(
+        index="action", columns="role", values="selections", fill_value=0
+    ).sort_values("candidate", ascending=False)
+    role_context_df = pd.DataFrame(role_context_rows).pivot_table(
+        index="context", columns="role", values="decisions", fill_value=0
+    ).sort_values("candidate", ascending=False)
+    display(role_action_df)
+    display(role_context_df)
+    display(finished[["turn", "decisions", "seconds"]].describe().T)
+
+    output = Path("/kaggle/working")
+    payload = {
+        "configuration": {
+            "contract_games": CONTRACT_GAMES,
+            "games_per_seat": GAMES_PER_SEAT,
+            "simulator_seed_exposed": False,
+        },
+        "summary": summary,
+        "context_counts": dict(context_counts),
+        "action_counts": dict(action_counts),
+        "role_context_counts": dict(role_context_counts),
+        "role_action_counts": dict(role_action_counts),
+        "contract_results": contract_results,
+        "matchup_results": matchup_results,
+    }
+    (output / "agent_evaluation_results.json").write_text(
+        json.dumps(payload, indent=2, default=str)
+    )
+    print(f"Saved evaluation evidence to {output / 'agent_evaluation_results.json'}")
+    """),
+    md("""
+    ## 7. Promotion decision
+
+    Reliability is mandatory. Strength promotion additionally requires a score
+    rate above 0.5 with an uncertainty interval that is useful for the decision,
+    no material seat collapse, and zero runtime failures. This random-policy
+    comparison is only the first control; the next notebook version should add
+    frozen historical and strategy-diverse opponents before a ladder submission.
+    """),
+]
+
+
+PACKAGING = [
+    md("""
+    # Submission Packaging and Runtime Validation
+
+    **Purpose.** Build a clean agent archive, execute the staged package with
+    the official simulator, and emit a traceable manifest.
+
+    **Decision question.** Does the exact tar.gz candidate import, locate its deck,
+    select legal actions, finish a game, and preserve the required root layout?
+
+    The previous packaging run verified structure but did not execute staged
+    `main.py`; that gap allowed a working-directory deck-path defect to escape.
+    This revision makes runtime smoke validation part of packaging itself.
+    """),
+    md("""
+    ## 1. Discover immutable inputs
+
+    Simulator files come only from the attached competition data. Reviewed
+    policy and deck files come from the private agent-source dataset. The
+    staging directory is recreated from scratch on every run.
+    """),
+    code("""
+    from collections import Counter
+    from pathlib import Path
+    import ast
+    import hashlib
+    import importlib.util
+    import json
+    import shutil
+    import sys
+    import time
+    import tarfile
+
+    import pandas as pd
+
+    PACKAGE_DIR = Path("/kaggle/working/submission_agent")
+    ARCHIVE = Path("/kaggle/working/submission.tar.gz")
+    MANIFEST_PATH = Path("/kaggle/working/submission_manifest.json")
+    MAX_DECISIONS = 10_000
+
+    sample = sorted(Path("/kaggle/input").rglob("sample_submission/main.py"))[0].parent
+    candidates = [Path("../agent"), Path("agent")]
+    candidates += [
+        path.parent for path in sorted(Path("/kaggle/input").rglob("main.py"))
+        if "sample_submission" not in path.parts and "cg" not in path.parts
+    ]
+    repo_agent = next(
+        (path for path in candidates
+         if (path / "main.py").exists() and (path / "deck.csv").exists()),
+        None,
+    )
+    if repo_agent is None:
+        raise FileNotFoundError("Attach the private agent-source dataset.")
+    print(f"Official runtime: {sample}")
+    print(f"Reviewed agent: {repo_agent}")
+    """),
+    md("""
+    ## 2. Assemble and statically validate
+
+    Static checks reject syntax errors, missing entrypoints, malformed deck
+    length, incomplete SDK copies, and unexpected source locations before the
+    more expensive simulator test.
+    """),
+    code("""
+    if PACKAGE_DIR.exists():
+        shutil.rmtree(PACKAGE_DIR)
+    PACKAGE_DIR.mkdir(parents=True)
+    shutil.copytree(sample / "cg", PACKAGE_DIR / "cg")
+    shutil.copy2(repo_agent / "main.py", PACKAGE_DIR / "main.py")
+    shutil.copy2(repo_agent / "deck.csv", PACKAGE_DIR / "deck.csv")
+
+    source = (PACKAGE_DIR / "main.py").read_text(encoding="utf-8-sig")
+    tree = ast.parse(source)
+    names = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    assert "agent" in names, "main.py must define agent(obs_dict)."
+
+    deck = [
+        int(value) for value in (PACKAGE_DIR / "deck.csv").read_text().splitlines()
+        if value.strip()
+    ]
+    assert len(deck) == 60, f"Expected 60 cards, found {len(deck)}."
+    display(pd.Series(Counter(deck), name="copies").rename_axis("card_id").to_frame())
+
+    required = {
+        "main.py", "deck.csv", "cg/__init__.py", "cg/api.py", "cg/game.py",
+        "cg/sim.py", "cg/utils.py", "cg/cg.dll", "cg/libcg.so",
+    }
+    staged = {
+        str(path.relative_to(PACKAGE_DIR)).replace("\\\\", "/")
+        for path in PACKAGE_DIR.rglob("*") if path.is_file()
+    }
+    assert required <= staged, f"Missing required files: {sorted(required - staged)}"
+    """),
+    md("""
+    ## 3. Execute the staged package
+
+    Import `main.py` from staging, not from the source dataset, and run one full
+    legality-checked self-play game. This specifically verifies module-relative
+    deck discovery and the Linux shared library used by Kaggle.
+    """),
+    code("""
+    sys.path.insert(0, str(PACKAGE_DIR))
+    spec = importlib.util.spec_from_file_location("staged_agent", PACKAGE_DIR / "main.py")
+    staged_agent = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(staged_agent)
+
+    from cg.api import to_observation_class
+    from cg.game import battle_finish, battle_select, battle_start
+
+    staged_deck = staged_agent.read_deck_csv()
+    assert staged_deck == deck
+    started = time.perf_counter()
+    decisions = 0
+    try:
+        obs_dict, start_data = battle_start(staged_deck, staged_deck)
+        assert obs_dict is not None, {
+            "error_player": start_data.errorPlayer,
+            "error_type": start_data.errorType,
+        }
+        while decisions < MAX_DECISIONS:
+            obs = to_observation_class(obs_dict)
+            if obs.current is not None and obs.current.result != -1:
+                runtime_smoke = {
+                    "status": "finished", "winner": int(obs.current.result),
+                    "turn": int(obs.current.turn), "decisions": decisions,
+                    "seconds": time.perf_counter() - started,
+                }
+                break
+            action = staged_agent.agent(obs_dict)
+            select = obs.select
+            assert isinstance(action, list)
+            assert len(action) == len(set(action))
+            assert select.minCount <= len(action) <= select.maxCount
+            assert all(isinstance(index, int) for index in action)
+            assert all(0 <= index < len(select.option) for index in action)
+            obs_dict = battle_select(action)
+            decisions += 1
+        else:
+            raise RuntimeError("Staged package reached the decision limit.")
+    finally:
+        battle_finish()
+    display(runtime_smoke)
+
+    for cache in PACKAGE_DIR.rglob("__pycache__"):
+        shutil.rmtree(cache)
+    for compiled in PACKAGE_DIR.rglob("*.pyc"):
+        compiled.unlink()
+    """),
+    md("""
+    ## 4. Hash, archive, and inspect
+
+    Source hashes link the ladder artifact to reviewed repository files. The
+    archive hash identifies the exact uploaded bytes. Tar members are relative
+    to staging so `main.py` cannot be hidden under an accidental parent folder.
+    """),
+    code("""
+    def sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    if ARCHIVE.exists():
+        ARCHIVE.unlink()
+    with tarfile.open(ARCHIVE, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+        for path in sorted(PACKAGE_DIR.rglob("*")):
+            if path.is_file():
+                archive.add(
+                    path,
+                    arcname=path.relative_to(PACKAGE_DIR).as_posix(),
+                    recursive=False,
+                )
+
+    with tarfile.open(ARCHIVE, "r:gz") as archive:
+        file_members = [member for member in archive.getmembers() if member.isfile()]
+        members = [member.name for member in file_members]
+        for member in file_members:
+            stream = archive.extractfile(member)
+            assert stream is not None
+            while stream.read(1 << 20):
+                pass
+    assert set(members) == required, {
+        "missing": sorted(required - set(members)),
+        "unexpected": sorted(set(members) - required),
+    }
+    assert not any(member.startswith("submission_agent/") for member in members)
+
+    manifest = {
+        "format": "tar.gz",
+        "main_sha256": sha256(PACKAGE_DIR / "main.py"),
+        "deck_sha256": sha256(PACKAGE_DIR / "deck.csv"),
+        "archive_sha256": sha256(ARCHIVE),
+        "archive_bytes": ARCHIVE.stat().st_size,
+        "members": members,
+        "runtime_smoke": runtime_smoke,
+    }
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2))
+    display(manifest)
+    print(f"Archive: {ARCHIVE} ({ARCHIVE.stat().st_size / 1e6:.2f} MB)")
+    """),
+    md("""
+    ## 5. Submission gate
+
+    A complete packaging run now proves static structure and one staged runtime
+    path. Submission still requires comparative evidence, recorded hashes,
+    review of live rules, and an intentional decision about the latest two
+    tracked ladder slots. Kaggle's validation episode remains the final runtime
+    authority.
+    """),
+]
+
+
+SEQUENCING = [
+    md("""
+    # Action-Sequencing Experiment: Development Before Attack
+
+    **Purpose.** Test one causal hypothesis from the baseline telemetry: the
+    attack-first policy attacks before developing its board and therefore loses
+    even to the random control.
+
+    **Single intended change.** Reorder legal main-phase actions from
+    `attack ? evolve ? ability ? attach ? play` to
+    `evolve ? ability ? attach ? play ? attack`. Deck, tie-breaking, setup
+    choices, and all non-main selections remain unchanged.
+
+    **Promotion question.** Does development-first beat the frozen baseline and
+    materially improve performance against the official random policy without
+    introducing contract failures?
+    """),
+    md("""
+    ## 1. Configuration
+
+    Each matchup is balanced across player seats. Python randomness is seeded,
+    but the simulator does not expose its card-draw or coin-toss seed; these are
+    independent seat-balanced games rather than exact paired simulations.
+    """),
+    code("""
+    from collections import Counter
+    from pathlib import Path
+    import importlib.util
+    import json
+    import random
+    import shutil
+    import sys
+    import time
+
+    import numpy as np
+    import pandas as pd
+
+    GAMES_PER_SEAT = 20
+    MAX_DECISIONS = 10_000
+    BASE_SEED = 20260621
+    BOOTSTRAP_SAMPLES = 10_000
+    WORK_DIR = Path("/kaggle/working/action_sequence_experiment")
+    BASELINE_RANDOM_BENCHMARK = 0.125
+    """),
+    code("""
+    def first_match(pattern: str) -> Path:
+        matches = sorted(Path("/kaggle/input").rglob(pattern))
+        if not matches:
+            raise FileNotFoundError(f"No Kaggle input matched {pattern}")
+        return matches[0]
+
+    def load_module(name: str, path: Path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    sample_dir = first_match("sample_submission/main.py").parent
+    agent_candidates = [
+        path.parent for path in sorted(Path("/kaggle/input").rglob("main.py"))
+        if "sample_submission" not in path.parts and "cg" not in path.parts
+    ]
+    agent_dir = next(
+        (path for path in agent_candidates
+         if (path / "main.py").exists() and (path / "deck.csv").exists()),
+        None,
+    )
+    if agent_dir is None:
+        raise FileNotFoundError("Attach the private agent-source dataset.")
+    print(f"Frozen source: {agent_dir / 'main.py'}")
+    print(f"Official random control: {sample_dir / 'main.py'}")
+    """),
+    md("""
+    ## 2. Freeze baseline and create the one-change candidate
+
+    Both deterministic modules are loaded from the same reviewed source. Only
+    the candidate's `MAIN_ACTION_PRIORITY` dictionary changes in memory. This
+    prevents accidental deck, setup, or tie-break differences.
+    """),
+    code("""
+    if WORK_DIR.exists():
+        shutil.rmtree(WORK_DIR)
+    shutil.copytree(sample_dir, WORK_DIR)
+    shutil.copy2(agent_dir / "main.py", WORK_DIR / "main.py")
+    shutil.copy2(agent_dir / "deck.csv", WORK_DIR / "deck.csv")
+    sys.path.insert(0, str(WORK_DIR))
+
+    from cg.api import AreaType, OptionType, SelectContext, SelectType, all_attack, all_card_data, to_observation_class
+    from cg.game import battle_finish, battle_select, battle_start
+
+    baseline = load_module("attack_first_baseline", WORK_DIR / "main.py")
+    candidate = load_module("development_first_candidate", WORK_DIR / "main.py")
+    random_control = load_module("official_random_control", sample_dir / "main.py")
+
+    attack_priority = {
+        OptionType.ATTACK: 0,
+        OptionType.EVOLVE: 1,
+        OptionType.ABILITY: 2,
+        OptionType.ATTACH: 3,
+        OptionType.PLAY: 4,
+        OptionType.RETREAT: 5,
+        OptionType.DISCARD: 6,
+        OptionType.END: 7,
+    }
+    development_priority = {
+        OptionType.EVOLVE: 0,
+        OptionType.ABILITY: 1,
+        OptionType.ATTACH: 2,
+        OptionType.PLAY: 3,
+        OptionType.ATTACK: 4,
+        OptionType.RETREAT: 5,
+        OptionType.DISCARD: 6,
+        OptionType.END: 7,
+    }
+    baseline.MAIN_ACTION_PRIORITY = attack_priority
+    candidate.MAIN_ACTION_PRIORITY = development_priority
+    assert baseline.MAIN_ACTION_PRIORITY[OptionType.ATTACK] == 0
+    assert candidate.MAIN_ACTION_PRIORITY[OptionType.ATTACK] == 4
+    deck = baseline.read_deck_csv()
+    assert deck == candidate.read_deck_csv() and len(deck) == 60
+    display(pd.DataFrame({
+        "attack_first": {key.name: value for key, value in baseline.MAIN_ACTION_PRIORITY.items()},
+        "development_first": {key.name: value for key, value in candidate.MAIN_ACTION_PRIORITY.items()},
+    }).sort_values("development_first"))
+    """),
+    md("""
+    ## 3. State-aware instrumentation
+
+    For the focal policy, record the public board immediately before each main
+    decision: HP, Energy, Bench, Hand, Prize count, available actions, and chosen
+    action. These snapshots explain *how* the ordering changes play rather than
+    reporting only final wins.
+    """),
+    code("""
+    def enum_name(enum_class, value) -> str:
+        try:
+            return enum_class(value).name
+        except (ValueError, TypeError):
+            return f"UNKNOWN_{value}"
+
+    def active_features(player_state) -> tuple[int, int]:
+        if not player_state.active or player_state.active[0] is None:
+            return 0, 0
+        active = player_state.active[0]
+        return int(active.hp), len(active.energies)
+
+    def state_snapshot(obs, player: int, chosen_action: str, matchup: str, game: int) -> dict:
+        yours = obs.current.players[player]
+        opponent = obs.current.players[1 - player]
+        your_hp, your_energy = active_features(yours)
+        opp_hp, opp_energy = active_features(opponent)
+        available = sorted({enum_name(OptionType, option.type) for option in obs.select.option})
+        return {
+            "matchup": matchup, "game": game, "player": player,
+            "turn": int(obs.current.turn), "turn_action": int(obs.current.turnActionCount),
+            "chosen_action": chosen_action, "available_actions": ",".join(available),
+            "your_active_hp": your_hp, "your_active_energy": your_energy,
+            "your_bench": len(yours.bench), "your_hand": int(yours.handCount),
+            "your_prizes": len(yours.prize), "your_deck": int(yours.deckCount),
+            "opp_active_hp": opp_hp, "opp_active_energy": opp_energy,
+            "opp_bench": len(opponent.bench), "opp_hand": int(opponent.handCount),
+            "opp_prizes": len(opponent.prize), "opp_deck": int(opponent.deckCount),
+        }
+
+    def validate_action(obs, action: list[int]) -> None:
+        select = obs.select
+        assert isinstance(action, list)
+        assert all(isinstance(index, int) for index in action)
+        assert len(action) == len(set(action))
+        assert select.minCount <= len(action) <= select.maxCount
+        assert all(0 <= index < len(select.option) for index in action)
+    """),
+    code("""
+    def play_game(
+        policies: dict[int, object],
+        focal_player: int,
+        game_id: int,
+        matchup: str,
+    ) -> tuple[dict, list[dict]]:
+        random.seed(BASE_SEED + game_id)
+        started = time.perf_counter()
+        decisions = 0
+        focal_actions = Counter()
+        snapshots = []
+        try:
+            obs_dict, start_data = battle_start(deck, deck)
+            if obs_dict is None:
+                return ({
+                    "status": "start_error", "matchup": matchup, "game": game_id,
+                    "focal_player": focal_player, "error_player": start_data.errorPlayer,
+                    "error_type": start_data.errorType,
+                }, snapshots)
+            while decisions < MAX_DECISIONS:
+                obs = to_observation_class(obs_dict)
+                if obs.current is not None and obs.current.result != -1:
+                    winner = int(obs.current.result)
+                    score = 1.0 if winner == focal_player else (0.0 if winner in (0, 1) else 0.5)
+                    return ({
+                        "status": "finished", "matchup": matchup, "game": game_id,
+                        "focal_player": focal_player, "winner": winner,
+                        "focal_score": score, "turn": int(obs.current.turn),
+                        "decisions": decisions, "seconds": time.perf_counter() - started,
+                        "focal_actions": dict(focal_actions),
+                    }, snapshots)
+
+                player = int(obs.current.yourIndex)
+                action = policies[player].agent(obs_dict)
+                validate_action(obs, action)
+                chosen_names = [
+                    enum_name(OptionType, obs.select.option[index].type) for index in action
+                ]
+                if player == focal_player:
+                    focal_actions.update(chosen_names)
+                    if obs.select.type == SelectType.MAIN and chosen_names:
+                        snapshots.append(state_snapshot(
+                            obs, player, chosen_names[0], matchup, game_id
+                        ))
+                obs_dict = battle_select(action)
+                decisions += 1
+            return ({
+                "status": "decision_limit", "matchup": matchup, "game": game_id,
+                "focal_player": focal_player, "decisions": decisions,
+            }, snapshots)
+        except Exception as error:
+            return ({
+                "status": "exception", "matchup": matchup, "game": game_id,
+                "focal_player": focal_player,
+                "error": f"{type(error).__name__}: {error}", "decisions": decisions,
+            }, snapshots)
+        finally:
+            try:
+                battle_finish()
+            except Exception:
+                pass
+    """),
+    md("""
+    ## 4. Seat-balanced tournament
+
+    Three matchups separate improvement from mere opponent weakness:
+
+    1. development-first versus attack-first;
+    2. development-first versus official random;
+    3. frozen attack-first versus official random as a benchmark refresh.
+    """),
+    code("""
+    experiments = [
+        ("development_vs_attack", candidate, baseline),
+        ("development_vs_random", candidate, random_control),
+        ("attack_vs_random", baseline, random_control),
+    ]
+    results, snapshots = [], []
+    game_id = 0
+    for matchup, focal_policy, opponent_policy in experiments:
+        for focal_player in (0, 1):
+            for repetition in range(GAMES_PER_SEAT):
+                policies = {focal_player: focal_policy, 1 - focal_player: opponent_policy}
+                result, game_snapshots = play_game(
+                    policies, focal_player, game_id, matchup
+                )
+                results.append(result)
+                snapshots.extend(game_snapshots)
+                game_id += 1
+
+    results_df = pd.DataFrame(results)
+    snapshots_df = pd.DataFrame(snapshots)
+    failures = results_df[results_df.status != "finished"]
+    assert failures.empty, failures.to_dict("records")
+    display(results_df.drop(columns=["focal_actions"], errors="ignore"))
+    print(f"Completed {len(results_df)} games with {len(failures)} failures.")
+    """),
+    md("""
+    ## 5. Outcome uncertainty and promotion gate
+
+    Bootstrap intervals describe game-level uncertainty. Promotion requires
+    development-first to beat attack-first and to improve convincingly over the
+    frozen baseline's `0.125` random-control benchmark. Reliability alone is
+    insufficient.
+    """),
+    code("""
+    rng = np.random.default_rng(BASE_SEED)
+    summaries = []
+    for matchup, group in results_df.groupby("matchup"):
+        scores = group.focal_score.to_numpy(dtype=float)
+        boot = rng.choice(
+            scores, size=(BOOTSTRAP_SAMPLES, len(scores)), replace=True
+        ).mean(axis=1)
+        low, high = np.quantile(boot, [0.025, 0.975])
+        summaries.append({
+            "matchup": matchup, "games": len(scores),
+            "wins": int((scores == 1).sum()), "draws": int((scores == 0.5).sum()),
+            "losses": int((scores == 0).sum()), "score_rate": float(scores.mean()),
+            "ci_low": float(low), "ci_high": float(high),
+        })
+    summary_df = pd.DataFrame(summaries).set_index("matchup")
+    display(summary_df)
+
+    head_to_head = summary_df.loc["development_vs_attack"]
+    versus_random = summary_df.loc["development_vs_random"]
+    if len(failures):
+        decision = "REJECT: runtime failure"
+    elif head_to_head.ci_low <= 0.5:
+        decision = "HOLD: development-first did not clearly beat attack-first"
+    elif versus_random.ci_low <= BASELINE_RANDOM_BENCHMARK:
+        decision = "HOLD: improvement over random benchmark is uncertain"
+    else:
+        decision = "PROMOTE: development-first passes sequencing gate"
+    print(f"Promotion decision: {decision}")
+    """),
+    md("""
+    ## 6. Episode/action-sequencing EDA
+
+    Compare action mix and the board state at attacks. A healthier candidate
+    should attach and develop before attacking, attack with more Energy or a
+    stronger board, and avoid simply extending games without improving results.
+    """),
+    code("""
+    action_rows = []
+    for result in results:
+        for action, count in result.get("focal_actions", {}).items():
+            action_rows.append({
+                "matchup": result["matchup"], "action": action, "count": count
+            })
+    action_df = pd.DataFrame(action_rows).groupby(
+        ["matchup", "action"], as_index=False
+    ).sum()
+    display(action_df.pivot(index="action", columns="matchup", values="count").fillna(0))
+
+    attack_states = snapshots_df[snapshots_df.chosen_action == "ATTACK"]
+    attack_summary = attack_states.groupby("matchup").agg(
+        attacks=("chosen_action", "size"),
+        median_turn=("turn", "median"),
+        mean_active_energy=("your_active_energy", "mean"),
+        mean_bench=("your_bench", "mean"),
+        mean_active_hp=("your_active_hp", "mean"),
+        mean_opponent_hp=("opp_active_hp", "mean"),
+    )
+    display(attack_summary)
+    display(snapshots_df.groupby(["matchup", "chosen_action"]).size().rename("count").to_frame())
+    """),
+    code("""
+    output = Path("/kaggle/working")
+    payload = {
+        "configuration": {
+            "games_per_seat": GAMES_PER_SEAT,
+            "single_change": "development actions before attack",
+            "simulator_seed_exposed": False,
+        },
+        "summary": summary_df.reset_index().to_dict("records"),
+        "decision": decision,
+        "attack_state_summary": attack_summary.reset_index().to_dict("records"),
+        "results": results,
+        "snapshots": snapshots,
+    }
+    (output / "action_sequence_experiment.json").write_text(
+        json.dumps(payload, indent=2, default=str)
+    )
+    print(f"Saved evidence to {output / 'action_sequence_experiment.json'}")
+    """),
+    md("""
+    ## 7. Follow-up: printed-damage knockout exception
+
+    The promoted development-first ordering remains frozen. The follow-up adds
+    one exception: when a legal attack's printed base damage is at least the
+    opponent Active Pokemon's current HP, attack immediately. This heuristic
+    deliberately ignores weakness, resistance, temporary prevention, and
+    effect-dependent damage; those limitations make comparative simulation the
+    promotion authority.
+    """),
+    code("""
+    attack_by_id = {attack.attackId: attack for attack in all_attack()}
+    knockout_module = load_module("printed_knockout_candidate", WORK_DIR / "main.py")
+    knockout_module.MAIN_ACTION_PRIORITY = development_priority.copy()
+
+    class PrintedKnockoutPolicy:
+        def __init__(self, source_module):
+            self.source = source_module
+            self.events = []
+
+        def agent(self, obs_dict: dict) -> list[int]:
+            obs = to_observation_class(obs_dict)
+            if obs.select is None:
+                return self.source.read_deck_csv()
+            if (
+                obs.current is not None
+                and int(obs.select.type) == int(SelectType.MAIN)
+                and obs.current.players[1 - int(obs.current.yourIndex)].active
+            ):
+                opponent = obs.current.players[1 - int(obs.current.yourIndex)]
+                active = opponent.active[0]
+                if active is not None:
+                    candidates = []
+                    for index, option in enumerate(obs.select.option):
+                        if int(option.type) != int(OptionType.ATTACK):
+                            continue
+                        attack = attack_by_id.get(option.attackId)
+                        if attack is not None and int(attack.damage) >= int(active.hp):
+                            candidates.append((int(attack.damage), self.source._stable_key(option, index), index, attack))
+                    if candidates:
+                        damage, _, index, attack = min(candidates)
+                        competing = sorted({
+                            enum_name(OptionType, option.type)
+                            for option in obs.select.option
+                            if int(option.type) in {
+                                int(OptionType.EVOLVE), int(OptionType.ABILITY),
+                                int(OptionType.ATTACH), int(OptionType.PLAY),
+                            }
+                        })
+                        self.events.append({
+                            "turn": int(obs.current.turn),
+                            "player": int(obs.current.yourIndex),
+                            "opponent_hp": int(active.hp),
+                            "attack_id": int(attack.attackId),
+                            "attack_name": attack.name,
+                            "printed_damage": int(damage),
+                            "competing_development": competing,
+                        })
+                        return [index]
+            return self.source.agent(obs_dict)
+
+    knockout_candidate = PrintedKnockoutPolicy(knockout_module)
+    """),
+    code("""
+    followup_results, followup_snapshots, trigger_events = [], [], []
+    game_id = 10_000
+    for focal_player in (0, 1):
+        for repetition in range(GAMES_PER_SEAT):
+            before = len(knockout_candidate.events)
+            policies = {
+                focal_player: knockout_candidate,
+                1 - focal_player: candidate,
+            }
+            result, game_snapshots = play_game(
+                policies, focal_player, game_id, "knockout_vs_development"
+            )
+            followup_results.append(result)
+            followup_snapshots.extend(game_snapshots)
+            for event in knockout_candidate.events[before:]:
+                trigger_events.append({
+                    **event, "game": game_id, "focal_player": focal_player,
+                })
+            game_id += 1
+
+    followup_df = pd.DataFrame(followup_results)
+    followup_failures = followup_df[followup_df.status != "finished"]
+    assert followup_failures.empty, followup_failures.to_dict("records")
+    scores = followup_df.focal_score.to_numpy(dtype=float)
+    boot = rng.choice(scores, size=(BOOTSTRAP_SAMPLES, len(scores)), replace=True).mean(axis=1)
+    followup_summary = {
+        "matchup": "knockout_vs_development",
+        "games": len(scores),
+        "wins": int((scores == 1).sum()),
+        "draws": int((scores == 0.5).sum()),
+        "losses": int((scores == 0).sum()),
+        "score_rate": float(scores.mean()),
+        "ci_low": float(np.quantile(boot, 0.025)),
+        "ci_high": float(np.quantile(boot, 0.975)),
+        "triggers": len(trigger_events),
+        "triggers_with_competing_development": sum(
+            bool(event["competing_development"]) for event in trigger_events
+        ),
+    }
+    if followup_summary["ci_low"] > 0.5:
+        followup_decision = "PROMOTE: knockout exception clearly beats development-first"
+    elif followup_summary["ci_high"] < 0.5:
+        followup_decision = "REJECT: knockout exception is clearly worse"
+    else:
+        followup_decision = "HOLD: result overlaps parity"
+    display(pd.Series(followup_summary).to_frame("value"))
+    print(f"Follow-up decision: {followup_decision}")
+    display(pd.DataFrame(trigger_events).head(20))
+    """),
+    code("""
+    payload["knockout_followup"] = {
+        "single_change": "attack when printed base damage >= opponent active HP",
+        "summary": followup_summary,
+        "decision": followup_decision,
+        "limitations": [
+            "printed damage excludes weakness and resistance",
+            "printed damage excludes temporary prevention and reduction",
+            "effect-dependent bonus damage is not estimated",
+        ],
+        "results": followup_results,
+        "trigger_events": trigger_events,
+        "snapshots": followup_snapshots,
+    }
+    (output / "action_sequence_experiment.json").write_text(
+        json.dumps(payload, indent=2, default=str)
+    )
+    print(f"Updated evidence at {output / 'action_sequence_experiment.json'}")
+    """),
+    md("""
+    ## 8. Follow-up: attack-readiness attachment scoring
+
+    This experiment preserves development-first action ordering and changes only
+    the target of an ATTACH action the baseline already selected. The scorer
+    first completes a Pokemon's strongest reliable printed-damage attack
+    threshold, otherwise advances the closest threshold, and deprioritizes
+    targets already at that threshold. Hand-card selection and all non-ATTACH
+    decisions retain the baseline's stable ordering.
+    """),
+    code("""
+    card_by_id = {card.cardId: card for card in all_card_data()}
+    attachment_module = load_module("attachment_scoring_candidate", WORK_DIR / "main.py")
+    attachment_module.MAIN_ACTION_PRIORITY = development_priority.copy()
+
+    def attack_profile(card_id: int) -> tuple[int, int]:
+        card = card_by_id[card_id]
+        attacks = [attack_by_id[attack_id] for attack_id in card.attacks]
+        reliable = [attack for attack in attacks if int(attack.damage) > 0]
+        if not reliable:
+            return 1, 0
+        strongest = max(reliable, key=lambda attack: (int(attack.damage), -len(attack.energies)))
+        return len(strongest.energies), int(strongest.damage)
+
+    def attachment_target(obs, option):
+        player = obs.current.players[int(obs.current.yourIndex)]
+        if int(option.inPlayArea) == int(AreaType.ACTIVE):
+            return player.active[0] if player.active else None
+        if int(option.inPlayArea) == int(AreaType.BENCH):
+            index = int(option.inPlayIndex)
+            return player.bench[index] if 0 <= index < len(player.bench) else None
+        return None
+
+    class AttachmentScoringPolicy:
+        def __init__(self, source_module):
+            self.source = source_module
+            self.events = []
+
+        def agent(self, obs_dict: dict) -> list[int]:
+            obs = to_observation_class(obs_dict)
+            baseline_action = self.source.agent(obs_dict)
+            if obs.select is None or obs.current is None or not baseline_action:
+                return baseline_action
+            baseline_option = obs.select.option[baseline_action[0]]
+            if (
+                int(obs.select.type) != int(SelectType.MAIN)
+                or int(baseline_option.type) != int(OptionType.ATTACH)
+            ):
+                return baseline_action
+
+            scored = []
+            for index, option in enumerate(obs.select.option):
+                if int(option.type) != int(OptionType.ATTACH):
+                    continue
+                target = attachment_target(obs, option)
+                if target is None:
+                    continue
+                threshold, printed_damage = attack_profile(int(target.id))
+                current_energy = len(target.energies)
+                after_energy = current_energy + 1
+                if current_energy < threshold <= after_energy:
+                    phase = 0  # Complete the useful attack threshold now.
+                elif after_energy < threshold:
+                    phase = 1  # Advance the closest unfinished threshold.
+                else:
+                    phase = 2  # Already ready; avoid unnecessary concentration.
+                remaining = max(threshold - after_energy, 0)
+                active_penalty = 0 if int(option.inPlayArea) == int(AreaType.ACTIVE) else 1
+                key = (
+                    phase, remaining, active_penalty, -printed_damage,
+                    self.source._stable_key(option, index),
+                )
+                scored.append((key, index, option, target, threshold, printed_damage))
+
+            if not scored:
+                return baseline_action
+            _, chosen_index, chosen_option, target, threshold, printed_damage = min(scored)
+            if chosen_index != baseline_action[0]:
+                baseline_target = attachment_target(obs, baseline_option)
+                self.events.append({
+                    "turn": int(obs.current.turn),
+                    "player": int(obs.current.yourIndex),
+                    "baseline_target_card": int(baseline_target.id) if baseline_target else None,
+                    "chosen_target_card": int(target.id),
+                    "chosen_target_area": enum_name(AreaType, chosen_option.inPlayArea),
+                    "energy_before": len(target.energies),
+                    "attack_threshold": threshold,
+                    "strongest_printed_damage": printed_damage,
+                })
+            return [chosen_index]
+
+    attachment_candidate = AttachmentScoringPolicy(attachment_module)
+    """),
+    code("""
+    attachment_results, attachment_snapshots, attachment_events = [], [], []
+    game_id = 20_000
+    for focal_player in (0, 1):
+        for repetition in range(GAMES_PER_SEAT):
+            before = len(attachment_candidate.events)
+            policies = {
+                focal_player: attachment_candidate,
+                1 - focal_player: candidate,
+            }
+            result, game_snapshots = play_game(
+                policies, focal_player, game_id, "attachment_vs_development"
+            )
+            attachment_results.append(result)
+            attachment_snapshots.extend(game_snapshots)
+            for event in attachment_candidate.events[before:]:
+                attachment_events.append({
+                    **event, "game": game_id, "focal_player": focal_player,
+                })
+            game_id += 1
+
+    attachment_df = pd.DataFrame(attachment_results)
+    attachment_failures = attachment_df[attachment_df.status != "finished"]
+    assert attachment_failures.empty, attachment_failures.to_dict("records")
+    scores = attachment_df.focal_score.to_numpy(dtype=float)
+    boot = rng.choice(scores, size=(BOOTSTRAP_SAMPLES, len(scores)), replace=True).mean(axis=1)
+    attachment_summary = {
+        "matchup": "attachment_vs_development",
+        "games": len(scores),
+        "wins": int((scores == 1).sum()),
+        "draws": int((scores == 0.5).sum()),
+        "losses": int((scores == 0).sum()),
+        "score_rate": float(scores.mean()),
+        "ci_low": float(np.quantile(boot, 0.025)),
+        "ci_high": float(np.quantile(boot, 0.975)),
+        "target_changes": len(attachment_events),
+    }
+    if attachment_summary["ci_low"] > 0.5:
+        attachment_decision = "PROMOTE: attachment scoring clearly beats development-first"
+    elif attachment_summary["ci_high"] < 0.5:
+        attachment_decision = "REJECT: attachment scoring is clearly worse"
+    else:
+        attachment_decision = "HOLD: result overlaps parity"
+    display(pd.Series(attachment_summary).to_frame("value"))
+    print(f"Attachment decision: {attachment_decision}")
+    display(pd.DataFrame(attachment_events).head(20))
+    """),
+    code("""
+    payload["attachment_followup"] = {
+        "single_change": "score the target of baseline-selected ATTACH actions",
+        "summary": attachment_summary,
+        "decision": attachment_decision,
+        "results": attachment_results,
+        "target_change_events": attachment_events,
+        "snapshots": attachment_snapshots,
+    }
+    (output / "action_sequence_experiment.json").write_text(
+        json.dumps(payload, indent=2, default=str)
+    )
+    print(f"Updated evidence at {output / 'action_sequence_experiment.json'}")
+    """),
+    md("""
+    ## 9. Follow-up: projected value per attachment
+
+    The readiness-only scorer reached parity but sometimes completed Snover's
+    low-value attack before developing stronger attackers. This candidate still
+    changes only the target of a baseline-selected ATTACH action. It values a
+    target by strongest reliable printed damage divided by Energy still needed,
+    includes direct evolution potential, gives the Active Pokemon a small
+    immediacy multiplier, and preserves baseline behavior when all targets are
+    already at their useful threshold.
+    """),
+    code("""
+    evolution_children = {}
+    for card in card_by_id.values():
+        if card.evolvesFrom:
+            evolution_children.setdefault(card.evolvesFrom, []).append(card)
+
+    def own_attack_profile(card) -> tuple[int, int, str]:
+        attacks = [attack_by_id[attack_id] for attack_id in card.attacks]
+        reliable = [attack for attack in attacks if int(attack.damage) > 0]
+        if not reliable:
+            return 1, 0, card.name
+        strongest = max(
+            reliable, key=lambda attack: (int(attack.damage), -len(attack.energies))
+        )
+        return len(strongest.energies), int(strongest.damage), card.name
+
+    def projected_attack_profile(card_id: int) -> tuple[int, int, str]:
+        card = card_by_id[card_id]
+        profiles = [own_attack_profile(card)]
+        profiles.extend(
+            own_attack_profile(child)
+            for child in evolution_children.get(card.name, [])
+        )
+        return max(profiles, key=lambda item: (item[1], -item[0]))
+
+    value_module = load_module("attachment_value_candidate", WORK_DIR / "main.py")
+    value_module.MAIN_ACTION_PRIORITY = development_priority.copy()
+
+    class AttachmentValuePolicy:
+        ACTIVE_MULTIPLIER = 1.15
+
+        def __init__(self, source_module):
+            self.source = source_module
+            self.events = []
+
+        def agent(self, obs_dict: dict) -> list[int]:
+            obs = to_observation_class(obs_dict)
+            baseline_action = self.source.agent(obs_dict)
+            if obs.select is None or obs.current is None or not baseline_action:
+                return baseline_action
+            baseline_option = obs.select.option[baseline_action[0]]
+            if (
+                int(obs.select.type) != int(SelectType.MAIN)
+                or int(baseline_option.type) != int(OptionType.ATTACH)
+            ):
+                return baseline_action
+
+            scored = []
+            for index, option in enumerate(obs.select.option):
+                if int(option.type) != int(OptionType.ATTACH):
+                    continue
+                target = attachment_target(obs, option)
+                if target is None:
+                    continue
+                threshold, damage, projected_card = projected_attack_profile(int(target.id))
+                current_energy = len(target.energies)
+                remaining = max(threshold - current_energy, 0)
+                if remaining == 0:
+                    continue  # Preserve baseline behavior once every target is ready.
+                value = float(damage) / remaining
+                if int(option.inPlayArea) == int(AreaType.ACTIVE):
+                    value *= self.ACTIVE_MULTIPLIER
+                key = (
+                    -value, -damage,
+                    self.source._stable_key(option, index),
+                )
+                scored.append((
+                    key, index, option, target, threshold, damage,
+                    projected_card, value,
+                ))
+
+            if not scored:
+                return baseline_action
+            (_, chosen_index, chosen_option, target, threshold, damage,
+             projected_card, value) = min(scored)
+            if chosen_index != baseline_action[0]:
+                baseline_target = attachment_target(obs, baseline_option)
+                self.events.append({
+                    "turn": int(obs.current.turn),
+                    "player": int(obs.current.yourIndex),
+                    "baseline_target_card": int(baseline_target.id) if baseline_target else None,
+                    "chosen_target_card": int(target.id),
+                    "chosen_target_area": enum_name(AreaType, chosen_option.inPlayArea),
+                    "energy_before": len(target.energies),
+                    "projected_card": projected_card,
+                    "attack_threshold": threshold,
+                    "projected_damage": damage,
+                    "value_per_remaining_energy": value,
+                })
+            return [chosen_index]
+
+    value_candidate = AttachmentValuePolicy(value_module)
+    """),
+    code("""
+    value_results, value_snapshots, value_events = [], [], []
+    game_id = 30_000
+    for focal_player in (0, 1):
+        for repetition in range(GAMES_PER_SEAT):
+            before = len(value_candidate.events)
+            policies = {
+                focal_player: value_candidate,
+                1 - focal_player: candidate,
+            }
+            result, game_snapshots = play_game(
+                policies, focal_player, game_id, "attachment_value_vs_development"
+            )
+            value_results.append(result)
+            value_snapshots.extend(game_snapshots)
+            for event in value_candidate.events[before:]:
+                value_events.append({
+                    **event, "game": game_id, "focal_player": focal_player,
+                })
+            game_id += 1
+
+    value_df = pd.DataFrame(value_results)
+    value_failures = value_df[value_df.status != "finished"]
+    assert value_failures.empty, value_failures.to_dict("records")
+    scores = value_df.focal_score.to_numpy(dtype=float)
+    boot = rng.choice(scores, size=(BOOTSTRAP_SAMPLES, len(scores)), replace=True).mean(axis=1)
+    value_summary = {
+        "matchup": "attachment_value_vs_development",
+        "games": len(scores),
+        "wins": int((scores == 1).sum()),
+        "draws": int((scores == 0.5).sum()),
+        "losses": int((scores == 0).sum()),
+        "score_rate": float(scores.mean()),
+        "ci_low": float(np.quantile(boot, 0.025)),
+        "ci_high": float(np.quantile(boot, 0.975)),
+        "target_changes": len(value_events),
+    }
+    if value_summary["ci_low"] > 0.5:
+        value_decision = "PROMOTE: attachment value scoring clearly beats development-first"
+    elif value_summary["ci_high"] < 0.5:
+        value_decision = "REJECT: attachment value scoring is clearly worse"
+    else:
+        value_decision = "HOLD: result overlaps parity"
+    display(pd.Series(value_summary).to_frame("value"))
+    print(f"Attachment-value decision: {value_decision}")
+    display(pd.DataFrame(value_events).head(20))
+    """),
+    code("""
+    payload["attachment_value_followup"] = {
+        "single_change": "projected damage per remaining Energy for ATTACH targets",
+        "active_multiplier": AttachmentValuePolicy.ACTIVE_MULTIPLIER,
+        "summary": value_summary,
+        "decision": value_decision,
+        "results": value_results,
+        "target_change_events": value_events,
+        "snapshots": value_snapshots,
+    }
+    (output / "action_sequence_experiment.json").write_text(
+        json.dumps(payload, indent=2, default=str)
+    )
+    print(f"Updated evidence at {output / 'action_sequence_experiment.json'}")
+    """),
+    md("""
+    ## 10. Interpretation
+
+    The original sequencing result promotes development-first over attack-first.
+    Each follow-up has a separate gate and frozen control. Promote attachment
+    value scoring only if its interval clears parity without runtime failures;
+    otherwise leave `agent/main.py` unchanged.
+    """),
+]
+
+
+DECK_CONSISTENCY = [
+    md("""
+    # Starter-Deck Setup Consistency Experiment
+
+    **Purpose.** Test whether increasing the starter deck from six to eight
+    Basic Pokemon improves game outcomes when the promoted development-first
+    policy is frozen.
+
+    **Single change.** Replace two of 35 Basic Water Energy cards with two
+    additional Kyogre copies. Every other card and every policy decision remain
+    unchanged.
+    """),
+    md("""
+    ## 1. Configuration and decision rule
+
+    The candidate and starter play both seats. The candidate is promoted only
+    if all games finish and its bootstrap 95% score interval clears parity.
+    Theoretical opening probability is exact hypergeometric evidence; simulator
+    outcomes remain the strength authority.
+    """),
+    code("""
+    from collections import Counter
+    from math import comb
+    from pathlib import Path
+    import importlib.util
+    import json
+    import random
+    import shutil
+    import sys
+    import time
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    GAMES_PER_SEAT = 40
+    MAX_DECISIONS = 10_000
+    BASE_SEED = 40_000
+    BOOTSTRAP_SAMPLES = 10_000
+    OPENING_HAND_SIZE = 7
+    BASIC_WATER_ENERGY_ID = 3
+    KYOGRE_ID = 721
+    SNO_VER_ID = 722
+    WORK_DIR = Path("/kaggle/working/deck_consistency")
+    """),
+    md("""
+    ## 2. Resolve immutable Kaggle inputs
+
+    The official simulator comes from the competition source. The reviewed
+    development-first agent and starter deck come from the private agent-source
+    dataset. No account-specific input path is hard-coded.
+    """),
+    code("""
+    def first_match(pattern: str) -> Path:
+        matches = sorted(Path("/kaggle/input").rglob(pattern))
+        if not matches:
+            raise FileNotFoundError(f"No Kaggle input matched {pattern}")
+        return matches[0]
+
+    def load_module(name: str, path: Path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    sample_dir = first_match("sample_submission/main.py").parent
+    agent_candidates = [
+        path.parent for path in sorted(Path("/kaggle/input").rglob("main.py"))
+        if "sample_submission" not in path.parts and "cg" not in path.parts
+    ]
+    agent_dir = next(
+        (path for path in agent_candidates
+         if (path / "main.py").exists() and (path / "deck.csv").exists()),
+        None,
+    )
+    if agent_dir is None:
+        raise FileNotFoundError("Attach the private agent-source dataset.")
+    print(f"Policy source: {agent_dir / 'main.py'}")
+    print(f"Starter deck: {agent_dir / 'deck.csv'}")
+    """),
+    code("""
+    if WORK_DIR.exists():
+        shutil.rmtree(WORK_DIR)
+    shutil.copytree(sample_dir, WORK_DIR)
+    shutil.copy2(agent_dir / "main.py", WORK_DIR / "main.py")
+    shutil.copy2(agent_dir / "deck.csv", WORK_DIR / "deck.csv")
+    sys.path.insert(0, str(WORK_DIR))
+
+    from cg.api import OptionType, SelectContext, all_card_data, to_observation_class
+    from cg.game import battle_finish, battle_select, battle_start
+
+    policy = load_module("frozen_development_policy", WORK_DIR / "main.py")
+    card_by_id = {card.cardId: card for card in all_card_data()}
+    """),
+    md("""
+    ## 3. Construct and audit the one-change deck
+
+    Kyogre is already in the starter list, so raising it from two to four copies
+    introduces no new card interaction. Removing two Energy preserves a very
+    high 33-card Energy count. The executable simulator start remains the final
+    legality check.
+    """),
+    code("""
+    starter_deck = policy.read_deck_csv()
+    candidate_deck = starter_deck.copy()
+    for _ in range(2):
+        candidate_deck.remove(BASIC_WATER_ENERGY_ID)
+    candidate_deck.extend([KYOGRE_ID, KYOGRE_ID])
+
+    def deck_audit(deck: list[int], label: str) -> dict:
+        counts = Counter(deck)
+        basic_count = sum(
+            copies for card_id, copies in counts.items()
+            if bool(card_by_id[card_id].basic)
+        )
+        setup_probability = 1 - comb(len(deck) - basic_count, OPENING_HAND_SIZE) / comb(
+            len(deck), OPENING_HAND_SIZE
+        )
+        return {
+            "deck": label,
+            "cards": len(deck),
+            "unique_ids": len(counts),
+            "basic_pokemon": basic_count,
+            "basic_water_energy": counts[BASIC_WATER_ENERGY_ID],
+            "kyogre": counts[KYOGRE_ID],
+            "snover": counts[SNO_VER_ID],
+            "setup_probability": setup_probability,
+            "no_basic_probability": 1 - setup_probability,
+            "max_non_basic_energy_copies": max(
+                copies for card_id, copies in counts.items()
+                if card_id != BASIC_WATER_ENERGY_ID
+            ),
+        }
+
+    audits = pd.DataFrame([
+        deck_audit(starter_deck, "starter_6_basic"),
+        deck_audit(candidate_deck, "candidate_8_basic"),
+    ]).set_index("deck")
+    display(audits)
+    assert len(starter_deck) == len(candidate_deck) == 60
+    assert Counter(candidate_deck)[KYOGRE_ID] == 4
+    assert Counter(candidate_deck)[BASIC_WATER_ENERGY_ID] == 33
+    assert audits.max_non_basic_energy_copies.max() <= 4
+    setup_gain = float(
+        audits.loc["candidate_8_basic", "setup_probability"]
+        - audits.loc["starter_6_basic", "setup_probability"]
+    )
+    print(f"Exact setup-probability gain: {setup_gain:.2%}")
+    """),
+    code("""
+    curve = pd.DataFrame({"basic_pokemon": np.arange(4, 13)})
+    curve["setup_probability"] = curve.basic_pokemon.map(
+        lambda count: 1 - comb(60 - int(count), OPENING_HAND_SIZE) / comb(60, OPENING_HAND_SIZE)
+    )
+    ax = curve.plot(
+        x="basic_pokemon", y="setup_probability", marker="o", legend=False,
+        figsize=(9, 4), color="#2a788e",
+    )
+    for count, color, label in [(6, "#d1495b", "starter"), (8, "#2a9d8f", "candidate")]:
+        probability = float(curve.loc[curve.basic_pokemon == count, "setup_probability"].iloc[0])
+        ax.scatter([count], [probability], color=color, s=80, label=label, zorder=3)
+    ax.set(
+        title="Opening hand contains at least one Basic Pokemon",
+        xlabel="Basic Pokemon in 60-card deck", ylabel="Probability", ylim=(0, 1),
+    )
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+    """),
+    md("""
+    ## 4. Seat-balanced instrumented runner
+
+    Candidate and control use the exact same policy module. Only the deck passed
+    to `battle_start` differs. We retain candidate/control mulligan-context
+    counts, actions, turns, decisions, runtime, and failures for attribution.
+    """),
+    code("""
+    def enum_name(enum_class, value) -> str:
+        try:
+            return enum_class(value).name
+        except (ValueError, TypeError):
+            return f"UNKNOWN_{value}"
+
+    def validate_action(obs, action: list[int]) -> None:
+        select = obs.select
+        assert isinstance(action, list)
+        assert all(isinstance(index, int) for index in action)
+        assert len(action) == len(set(action))
+        assert select.minCount <= len(action) <= select.maxCount
+        assert all(0 <= index < len(select.option) for index in action)
+
+    def play_game(candidate_player: int, game_id: int) -> dict:
+        random.seed(BASE_SEED + game_id)
+        decks = {
+            candidate_player: candidate_deck,
+            1 - candidate_player: starter_deck,
+        }
+        started = time.perf_counter()
+        decisions = 0
+        role_actions = Counter()
+        mulligan_contexts = Counter()
+        try:
+            obs_dict, start_data = battle_start(decks[0], decks[1])
+            if obs_dict is None:
+                return {
+                    "status": "start_error", "game": game_id,
+                    "candidate_player": candidate_player,
+                    "error_player": start_data.errorPlayer,
+                    "error_type": start_data.errorType,
+                }
+            while decisions < MAX_DECISIONS:
+                obs = to_observation_class(obs_dict)
+                if obs.current is not None and obs.current.result != -1:
+                    winner = int(obs.current.result)
+                    score = 1.0 if winner == candidate_player else (0.0 if winner in (0, 1) else 0.5)
+                    return {
+                        "status": "finished", "game": game_id,
+                        "candidate_player": candidate_player, "winner": winner,
+                        "candidate_score": score, "turn": int(obs.current.turn),
+                        "decisions": decisions, "seconds": time.perf_counter() - started,
+                        "candidate_mulligan_contexts": mulligan_contexts["candidate"],
+                        "starter_mulligan_contexts": mulligan_contexts["starter"],
+                        "role_actions": dict(role_actions),
+                    }
+                player = int(obs.current.yourIndex)
+                role = "candidate" if player == candidate_player else "starter"
+                if int(obs.select.context) == int(SelectContext.MULLIGAN):
+                    mulligan_contexts[role] += 1
+                action = policy.agent(obs_dict)
+                validate_action(obs, action)
+                for index in action:
+                    action_name = enum_name(OptionType, obs.select.option[index].type)
+                    role_actions[f"{role}:{action_name}"] += 1
+                obs_dict = battle_select(action)
+                decisions += 1
+            return {
+                "status": "decision_limit", "game": game_id,
+                "candidate_player": candidate_player, "decisions": decisions,
+            }
+        except Exception as error:
+            return {
+                "status": "exception", "game": game_id,
+                "candidate_player": candidate_player,
+                "error": f"{type(error).__name__}: {error}",
+                "decisions": decisions,
+            }
+        finally:
+            try:
+                battle_finish()
+            except Exception:
+                pass
+    """),
+    md("""
+    ## 5. Tournament and outcome uncertainty
+
+    Forty games per candidate seat provide 80 directional screening games.
+    Bootstrap intervals describe game-level uncertainty; this remains a screen,
+    not a final ladder estimate or a substitute for opponent diversity.
+    """),
+    code("""
+    results = []
+    game_id = 0
+    for candidate_player in (0, 1):
+        for repetition in range(GAMES_PER_SEAT):
+            results.append(play_game(candidate_player, game_id))
+            game_id += 1
+
+    results_df = pd.DataFrame(results)
+    failures = results_df[results_df.status != "finished"]
+    assert failures.empty, failures.to_dict("records")
+    scores = results_df.candidate_score.to_numpy(dtype=float)
+    rng = np.random.default_rng(BASE_SEED)
+    boot = rng.choice(scores, size=(BOOTSTRAP_SAMPLES, len(scores)), replace=True).mean(axis=1)
+    summary = {
+        "games": len(scores),
+        "wins": int((scores == 1).sum()),
+        "draws": int((scores == 0.5).sum()),
+        "losses": int((scores == 0).sum()),
+        "score_rate": float(scores.mean()),
+        "ci_low": float(np.quantile(boot, 0.025)),
+        "ci_high": float(np.quantile(boot, 0.975)),
+        "failures": len(failures),
+        "setup_probability_gain": setup_gain,
+    }
+    if summary["ci_low"] > 0.5:
+        decision = "PROMOTE: eight-Basic deck clearly beats starter"
+    elif summary["ci_high"] < 0.5:
+        decision = "REJECT: eight-Basic deck is clearly worse"
+    else:
+        decision = "HOLD: result overlaps parity"
+    display(pd.Series(summary).to_frame("value"))
+    print(f"Deck decision: {decision}")
+    """),
+    md("""
+    ## 6. Setup and action telemetry
+
+    Compare observed mulligan decision contexts and action totals. The exact
+    probability calculation is the cleaner setup measure; observed contexts are
+    a simulator-level consistency check and may not be one-to-one with physical
+    mulligan counts.
+    """),
+    code("""
+    setup_telemetry = results_df.groupby("candidate_player").agg(
+        games=("game", "size"),
+        score_rate=("candidate_score", "mean"),
+        candidate_mulligan_mean=("candidate_mulligan_contexts", "mean"),
+        starter_mulligan_mean=("starter_mulligan_contexts", "mean"),
+        median_turn=("turn", "median"),
+        mean_seconds=("seconds", "mean"),
+    )
+    display(setup_telemetry)
+
+    action_rows = []
+    for result in results:
+        for role_action, count in result.get("role_actions", {}).items():
+            role, action = role_action.split(":", 1)
+            action_rows.append({"role": role, "action": action, "count": count})
+    action_df = pd.DataFrame(action_rows).groupby(["role", "action"], as_index=False).sum()
+    display(action_df.pivot(index="action", columns="role", values="count").fillna(0))
+    """),
+    code("""
+    output = Path("/kaggle/working")
+    payload = {
+        "single_change": "replace two Basic Water Energy with two Kyogre",
+        "configuration": {
+            "games_per_seat": GAMES_PER_SEAT,
+            "simulator_seed_exposed": False,
+        },
+        "deck_audits": audits.reset_index().to_dict("records"),
+        "summary": summary,
+        "decision": decision,
+        "setup_telemetry": setup_telemetry.reset_index().to_dict("records"),
+        "results": results,
+    }
+    (output / "deck_consistency_experiment.json").write_text(
+        json.dumps(payload, indent=2, default=str)
+    )
+    print(f"Saved evidence to {output / 'deck_consistency_experiment.json'}")
+    """),
+    md("""
+    ## 7. Interpretation
+
+    Promote only the tested two-card substitution. A hold leaves `agent/deck.csv`
+    unchanged and motivates either more games or a different Basic-Pokemon mix.
+    Do not combine this deck intervention with a policy change in the same gate.
+    """),
+]
+
+
+OUT.mkdir(parents=True, exist_ok=True)
+save("01_card_database_eda.ipynb", EDA)
+save("02_agent_baseline_and_local_evaluation.ipynb", EVALUATION)
+save("03_submission_packaging_and_validation.ipynb", PACKAGING)
+save("04_action_sequence_experiment.ipynb", SEQUENCING)
+save("05_deck_consistency_experiment.ipynb", DECK_CONSISTENCY)
