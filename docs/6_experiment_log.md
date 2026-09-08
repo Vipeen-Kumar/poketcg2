@@ -80,5 +80,113 @@ reaches a meaningful paired evaluation or Kaggle submission.
 | 2026-06-21 | `pokemon-tcg-submission-packaging` | 6 | Complete | Promoted-agent tar.gz, staged runtime, and hashes verified |
 
 The private Kaggle dataset
-[`tuannm3812/pokemon-tcg-ai-battle-agent-source`](https://www.kaggle.com/datasets/tuannm3812/pokemon-tcg-ai-battle-agent-source)
+[`vipeen-kumar/pokemon-tcg-ai-battle-agent-source`](https://www.kaggle.com/datasets/vipeen-kumar/pokemon-tcg-ai-battle-agent-source)
 provides the reviewed `main.py` and `deck.csv` to the execution notebooks.
+
+### 2026-08-16 - final deadline hold on `kojimar_simple_baseline_v1`
+
+- Hypothesis:
+  A retreat-priority patch in `kojimar_simple_baseline_v26` might reduce a real
+  loss mode without hurting the rest of Kojimar v1's behavior.
+- Single intended change:
+  Boost retreat scoring when the opponent active appears able to KO our active.
+- Frozen control and opponents:
+  `kojimar_simple_baseline_v1` as the live safe baseline and direct control.
+- Seeds, seats, and game count:
+  30 seat-balanced head-to-head games for the corrected follow-up check.
+- Result with uncertainty:
+  The retreat experiment failed twice in the same direction. The first attempt
+  used a guessed weakness rule and produced a misleading 10-game `9-1` result.
+  After correcting the weakness rule to match verified code (`2x` weakness,
+  `-30` resistance), the original approach lost `11-19` over 30 games. A second
+  follow-up rebuilt the opponent threat estimate through generic SDK attack
+  metadata, but the 30-game seat-balanced result remained `11-19` (`36.7%`)
+  versus `kojimar_simple_baseline_v1`.
+- Runtime/errors:
+  No packaging or submission was attempted for v26. The experimental logic was
+  reverted to the v1 retreat behavior and the threat estimators were kept only
+  as dead-code reference in `candidates/kojimar_simple_baseline_v26/main.py`.
+- Interpretation:
+  This is a negative result, not a deadline-day bug hunt. The retreat idea did
+  not survive corrected rules, generic API estimation, or the required 30-game
+  validation bar.
+- Decision and next action:
+  Keep `submission_kojimar.tar.gz` / `kojimar_simple_baseline_v1` as the final
+  working submission at about `695` live rating. Do not submit v26. Do not
+  package any additional candidate before the 2026-08-16 11:59 PM UTC deadline
+  unless a separately validated candidate already exists, which current records
+  do not show.
+
+### 2026-08-16 - reject `kojimar_simple_baseline_v27` Crustle targeting change
+
+- Hypothesis:
+  Kojimar v1 recognized Crustle-wall decks but only used that signal
+  defensively. A narrow offensive Crustle targeting rule might improve the
+  matchup without disturbing the rest of the policy.
+- Single intended change:
+  Add a two-part active-Crustle optimization:
+  1. allow Mega Lucario ex attack planning to consider the opponent's active
+     Crustle (`id 345`) as a valid target instead of always skipping it;
+  2. add a `1150` attack-option score for the matching planned attack when the
+     opponent is a Crustle-wall deck and that active Crustle is the target.
+- Frozen control and opponents:
+  `kojimar_simple_baseline_v1` as the live safe baseline and direct control.
+- Seeds, seats, and game count:
+  60 total seat-balanced head-to-head games, run as two 30-game batches.
+- Result with uncertainty:
+  First batch: `18-12-0` (`60.0%`). Second batch: `15-15-0` (`50.0%`).
+  Combined result: `33-27-0` (`55.0%`) versus `kojimar_simple_baseline_v1`.
+- Runtime/errors:
+  The change remained isolated to the Crustle-targeting path and did not touch
+  retreat, setup, or energy logic. No packaging or submission was attempted.
+- Interpretation:
+  The code change was narrow and behaved as intended, but the 60-game combined
+  result is too close to the noise floor for a confidence-worthy deadline-day
+  promotion.
+- Decision and next action:
+  Revert `kojimar_simple_baseline_v27` back to clean v1 behavior. Do not
+  package or submit v27. Keep `submission_kojimar.tar.gz` /
+  `kojimar_simple_baseline_v1` as the final live submission at about `695`.
+
+### 2026-08-16 - final day wrap-up: v26, v27, v28, v29 all held
+
+- Hypothesis:
+  A few very narrow end-of-deadline tweaks might improve `kojimar_simple_baseline_v1`
+  without risking broad regressions: retreat-threat logic, active-Crustle
+  targeting, and small deck-card swaps.
+- Single intended change:
+  Multiple isolated attempts were tested independently against frozen control
+  `kojimar_simple_baseline_v1`.
+- Frozen control and opponents:
+  `kojimar_simple_baseline_v1` as the live safe baseline and direct control for
+  every final-day experiment.
+- Seeds, seats, and game count:
+  All final-day claims used seat-balanced direct checks. v26 was tested twice at
+  30 games each after rule correction / generic-API reconstruction. v27 used 60
+  total games as two 30-game batches. v28 and v29 used 30 games each.
+- Result with uncertainty:
+  - `v26` retreat threat experiment:
+    first small-sample run was misleading. Corrected follow-up versus v1:
+    `11-19-0` (`36.7%`). Rebuilt generic-API threat estimator follow-up versus
+    v1: `11-19-0` (`36.7%`) again.
+  - `v27` Crustle targeting experiment:
+    batch 1 `18-12-0` (`60.0%`), batch 2 `15-15-0` (`50.0%`), combined
+    `33-27-0` (`55.0%`).
+  - `v28` Ultra Ball for Dusk Ball deck swap:
+    `15-15-0` (`50.0%`).
+  - `v29` Night Stretcher for Gravity Mountain deck swap:
+    `16-14-0` (`53.3%`).
+- Runtime/errors:
+  No final-day candidate cleared the bar for confident promotion. None was
+  packaged or submitted. Experimental candidate folders were returned to clean
+  v1-equivalent behavior after rejection where applicable.
+- Interpretation:
+  The retreat idea failed twice in the same direction and is a genuine negative
+  result. The Crustle targeting tweak was directionally interesting but too
+  unstable over 60 games. The deck swaps were neutral to mildly positive at
+  best, but not strong enough to justify a last-day submission decision.
+- Decision and next action:
+  Stop experimentation. Keep `submission_kojimar.tar.gz` /
+  `kojimar_simple_baseline_v1` as the sole final submission for Sunday, August
+  16, 2026, with the user-tracked live rating around `695`. No further action
+  is needed before the deadline.

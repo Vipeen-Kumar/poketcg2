@@ -90,7 +90,7 @@ def main() -> None:
     parser.add_argument("--candidate", required=True, choices=sorted(suite.AGENT_PATHS))
     parser.add_argument("--reference", default="kojimar_simple_baseline_v1", choices=sorted(suite.AGENT_PATHS))
     parser.add_argument("--submission-id", type=int, default=54303967)
-    parser.add_argument("--team-name", default="tuannm3812")
+    parser.add_argument("--team-name", default="vipeen-kumar")
     parser.add_argument("--archetypes", nargs="+", default=["metal_cinderace", "alakazam_dunsparce"])
     parser.add_argument("--start-turn", type=int, default=5)
     parser.add_argument("--end-turn", type=int, default=7)

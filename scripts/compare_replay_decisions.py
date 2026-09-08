@@ -125,7 +125,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", required=True, choices=sorted(suite.AGENT_PATHS))
     parser.add_argument("--submission-id", type=int, default=54303967)
-    parser.add_argument("--team-name", default="tuannm3812")
+    parser.add_argument("--team-name", default="vipeen-kumar")
     parser.add_argument("--only-losses", action="store_true")
     parser.add_argument("--max-episodes", type=int, default=0)
     args = parser.parse_args()

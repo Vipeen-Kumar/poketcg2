@@ -1,5 +1,5 @@
 {
-  "id": "tuannm3812/pokemon-tcg-agent-baseline-and-evaluation",
+  "id": "vipeen-kumar/pokemon-tcg-agent-baseline-and-evaluation",
   "title": "Pokemon TCG - Agent Baseline and Evaluation",
   "code_file": "02_agent_baseline_and_local_evaluation.ipynb",
   "language": "python",
@@ -8,6 +8,6 @@
   "enable_gpu": false,
   "enable_internet": false,
   "competition_sources": ["pokemon-tcg-ai-battle"],
-  "dataset_sources": ["tuannm3812/pokemon-tcg-ai-battle-agent-source"],
+  "dataset_sources": ["vipeen-kumar/pokemon-tcg-ai-battle-agent-source"],
   "kernel_sources": []
 }

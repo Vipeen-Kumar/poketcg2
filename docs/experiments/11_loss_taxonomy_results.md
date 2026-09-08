@@ -3,7 +3,7 @@
 ## Scope
 
 The private Kaggle notebook
-[pokemon-tcg-loss-taxonomy-and-pressure-opponent](https://www.kaggle.com/code/tuannm3812/pokemon-tcg-loss-taxonomy-and-pressure-opponent)
+[pokemon-tcg-loss-taxonomy-and-pressure-opponent](https://www.kaggle.com/code/vipeen-kumar/pokemon-tcg-loss-taxonomy-and-pressure-opponent)
 version 1 ran a diagnostic tournament on 2026-06-26.
 
 This notebook is not a promotion gate. It compares frozen policies and labels

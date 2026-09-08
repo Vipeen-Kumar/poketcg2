@@ -3,7 +3,7 @@
 ## Scope
 
 Kaggle notebook
-[pokemon-tcg-submission-packaging](https://www.kaggle.com/code/tuannm3812/pokemon-tcg-submission-packaging)
+[pokemon-tcg-submission-packaging](https://www.kaggle.com/code/vipeen-kumar/pokemon-tcg-submission-packaging)
 version 8 completed successfully on 2026-06-27.
 
 The package uses the current promoted production files:

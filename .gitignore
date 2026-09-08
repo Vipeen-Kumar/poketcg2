@@ -3,6 +3,9 @@ kaggle.json
 kaggle_*.json
 .env
 
+# Kaggle writeup files (do not publish to GitHub)
+writeup/
+
 # Python and notebook state
 __pycache__/
 *.py[cod]

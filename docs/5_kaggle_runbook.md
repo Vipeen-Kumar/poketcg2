@@ -60,7 +60,7 @@ the repository's `agent/` directory if needed, and run:
 
 ```powershell
 python -m kaggle kernels push -p notebooks
-python -m kaggle kernels status tuannm3812/pokemon-tcg-card-database-eda
+python -m kaggle kernels status vipeen-kumar/pokemon-tcg-card-database-eda
 ```
 
 Keep API credentials outside this repository. The metadata templates are

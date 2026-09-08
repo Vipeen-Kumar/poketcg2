@@ -1,5 +1,5 @@
 {
-  "id": "tuannm3812/pokemon-tcg-conservative-switch-v2-experiment",
+  "id": "vipeen-kumar/pokemon-tcg-conservative-switch-v2-experiment",
   "title": "Pokemon TCG Conservative Switch v2 Experiment",
   "code_file": "12_conservative_switch_v2_experiment.ipynb",
   "language": "python",
@@ -11,7 +11,7 @@
     "pokemon-tcg-ai-battle"
   ],
   "dataset_sources": [
-    "tuannm3812/pokemon-tcg-ai-battle-agent-source"
+    "vipeen-kumar/pokemon-tcg-ai-battle-agent-source"
   ],
   "kernel_sources": []
 }

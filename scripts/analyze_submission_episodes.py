@@ -199,7 +199,7 @@ def write_summary(submission_id: int, rows: list[dict[str, Any]]) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--submission-id", type=int, required=True)
-    parser.add_argument("--team-name", default="tuannm3812")
+    parser.add_argument("--team-name", default="vipeen-kumar")
     args = parser.parse_args()
 
     names = card_names()

@@ -4,8 +4,8 @@
 
 Two private Kaggle notebooks completed the observability step:
 
-- [First Player Replays](https://www.kaggle.com/code/tuannm3812/pokemon-tcg-first-player-replays), version 1;
-- [Controlled Turn Order](https://www.kaggle.com/code/tuannm3812/pokemon-tcg-controlled-turn-order), version 2.
+- [First Player Replays](https://www.kaggle.com/code/vipeen-kumar/pokemon-tcg-first-player-replays), version 1;
+- [Controlled Turn Order](https://www.kaggle.com/code/vipeen-kumar/pokemon-tcg-controlled-turn-order), version 2.
 
 The production agent and deck were not changed.
 

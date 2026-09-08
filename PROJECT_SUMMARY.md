@@ -410,7 +410,7 @@ Running this project teaches:
 ## 📚 References
 
 - **Kaggle Page**: https://www.kaggle.com/competitions/pokemon-tcg-ai-battle
-- **Official Notebooks**: Links in `docs/README.md` (tuannm3812's Kaggle profile)
+- **Official Notebooks**: Links in `docs/README.md` (vipeen-kumar's Kaggle profile)
 - **Competition Rules**: See `docs/1_competition_instructions.md`
 - **Detailed Strategy**: See `docs/3_agent_strategy.md`
 

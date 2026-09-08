@@ -3,7 +3,7 @@
 ## Scope
 
 The private Kaggle notebook
-[pokemon-tcg-conservative-switch-experiment](https://www.kaggle.com/code/tuannm3812/pokemon-tcg-conservative-switch-experiment)
+[pokemon-tcg-conservative-switch-experiment](https://www.kaggle.com/code/vipeen-kumar/pokemon-tcg-conservative-switch-experiment)
 version 1 evaluated `conservative_switch_v1` on 2026-06-26.
 
 Production remains unchanged. `agent/main.py` and `agent/deck.csv` were not

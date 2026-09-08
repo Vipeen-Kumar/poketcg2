@@ -4,8 +4,8 @@
 
 Two private Kaggle experiments evaluated a stateless Mega Abomasnow/Kyogre attack planner while freezing the production deck and promoted policy:
 
-- [Planner v1](https://www.kaggle.com/code/tuannm3812/pokemon-tcg-abomasnow-attack-planner), version 1.
-- [Planner v2 resource guards](https://www.kaggle.com/code/tuannm3812/pokemon-tcg-abomasnow-resource-guards), version 1.
+- [Planner v1](https://www.kaggle.com/code/vipeen-kumar/pokemon-tcg-abomasnow-attack-planner), version 1.
+- [Planner v2 resource guards](https://www.kaggle.com/code/vipeen-kumar/pokemon-tcg-abomasnow-resource-guards), version 1.
 
 Neither candidate is promoted. `agent/main.py` and `agent/deck.csv` remain unchanged.
 

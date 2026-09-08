@@ -108,11 +108,11 @@ The complete workflow was run on Kaggle on 21 June 2026:
 
 | Notebook | Status | Evidence |
 | --- | --- | --- |
-| [Card Database EDA](https://www.kaggle.com/code/tuannm3812/pokemon-tcg-card-database-eda) | Complete | 1,267 cards plus bounded PDF-reference audit |
-| [Agent Evaluation](https://www.kaggle.com/code/tuannm3812/pokemon-tcg-agent-baseline-and-evaluation) | Complete | Promoted agent passed random screen at 0.775 |
-| [Action Sequence Experiment](https://www.kaggle.com/code/tuannm3812/pokemon-tcg-action-sequence-experiment) | Complete | Development-first promoted; three isolated follow-ups held |
-| [Deck Consistency Experiment](https://www.kaggle.com/code/tuannm3812/pokemon-tcg-deck-consistency-experiment) | Complete | Eight-Basic variant held at 40-0-40 over 80 games |
-| [Submission Packaging](https://www.kaggle.com/code/tuannm3812/pokemon-tcg-submission-packaging) | Complete | Promoted-agent tar.gz and hashes verified |
+| [Card Database EDA](https://www.kaggle.com/code/vipeen-kumar/pokemon-tcg-card-database-eda) | Complete | 1,267 cards plus bounded PDF-reference audit |
+| [Agent Evaluation](https://www.kaggle.com/code/vipeen-kumar/pokemon-tcg-agent-baseline-and-evaluation) | Complete | Promoted agent passed random screen at 0.775 |
+| [Action Sequence Experiment](https://www.kaggle.com/code/vipeen-kumar/pokemon-tcg-action-sequence-experiment) | Complete | Development-first promoted; three isolated follow-ups held |
+| [Deck Consistency Experiment](https://www.kaggle.com/code/vipeen-kumar/pokemon-tcg-deck-consistency-experiment) | Complete | Eight-Basic variant held at 40-0-40 over 80 games |
+| [Submission Packaging](https://www.kaggle.com/code/vipeen-kumar/pokemon-tcg-submission-packaging) | Complete | Promoted-agent tar.gz and hashes verified |
 
 The agent source is mounted from a private Kaggle dataset and credentials remain
 outside this repository.
